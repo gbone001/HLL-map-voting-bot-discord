@@ -176,8 +176,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         flags: MessageFlags.Ephemeral
                     });
                 }
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
                 const panel = await mapVotePanelService.buildControlPanel(service, crcon, serverName);
-                await interaction.reply(panel);
+                await interaction.editReply(panel);
             }
 
             else if (subcommand === 'start') {
