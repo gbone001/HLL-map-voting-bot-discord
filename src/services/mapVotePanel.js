@@ -153,7 +153,8 @@ class MapVotePanelService {
                 name: '⚙️ Settings',
                 value: `**Maps/Vote:** ${config.mapsPerVote}\n` +
                        `**Night Maps:** ${config.nightMapCount}\n` +
-                       `**Warfare:** ${config.modeWeights?.warfare || 0} | **Offensive:** ${config.modeWeights?.offensive || 0}`,
+                       `**Warfare:** ${config.modeWeights?.warfare || 0} | **Offensive:** ${config.modeWeights?.offensive || 0}\n` +
+                       `**Map Cooldown Votes:** ${config.excludeRecentMaps ?? 3}`,
                 inline: true
             });
 
@@ -542,7 +543,7 @@ class MapVotePanelService {
                 inline: true
             },
             {
-                name: '♻️ Recent Map Cooldown',
+                name: '♻️ Map Vote Cooldown After Playing',
                 value: `${config.excludeRecentMaps ?? 3} vote(s)`
             }
         );
@@ -572,6 +573,11 @@ class MapVotePanelService {
                 .setCustomId('mapvote_set_night_count')
                 .setLabel('Night Maps')
                 .setEmoji('🌙')
+                .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId('mapvote_set_cooldown')
+                .setLabel('Map Cooldown -')
+                .setEmoji('♻️')
                 .setStyle(ButtonStyle.Secondary)
         );
 

@@ -494,7 +494,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             // Settings modals
             else if (customId === 'mapvote_set_activate') {
                 const modal = new ModalBuilder()
-                    .setCustomId('mapvote_modal_activate')
+                    .setCustomId(`mapvote_modal_activate_${serverNum}`)
                     .setTitle('Set Minimum Players')
                     .addComponents(
                         new ActionRowBuilder().addComponents(
@@ -511,7 +511,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             else if (customId === 'mapvote_set_deactivate') {
                 const modal = new ModalBuilder()
-                    .setCustomId('mapvote_modal_deactivate')
+                    .setCustomId(`mapvote_modal_deactivate_${serverNum}`)
                     .setTitle('Set Deactivate Players')
                     .addComponents(
                         new ActionRowBuilder().addComponents(
@@ -528,7 +528,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             else if (customId === 'mapvote_set_maps_count') {
                 const modal = new ModalBuilder()
-                    .setCustomId('mapvote_modal_maps_count')
+                    .setCustomId(`mapvote_modal_maps_count_${serverNum}`)
                     .setTitle('Set Maps Per Vote')
                     .addComponents(
                         new ActionRowBuilder().addComponents(
@@ -545,7 +545,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             else if (customId === 'mapvote_set_night_count') {
                 const modal = new ModalBuilder()
-                    .setCustomId('mapvote_modal_night_count')
+                    .setCustomId(`mapvote_modal_night_count_${serverNum}`)
                     .setTitle('Set Night Map Count')
                     .addComponents(
                         new ActionRowBuilder().addComponents(
@@ -554,6 +554,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
                                 .setLabel('Number of night maps per vote')
                                 .setStyle(TextInputStyle.Short)
                                 .setValue(String(service.nightMapCount))
+                                .setRequired(true)
+                        )
+                    );
+                await interaction.showModal(modal);
+            }
+
+            else if (customId === 'mapvote_set_cooldown') {
+                const modal = new ModalBuilder()
+                    .setCustomId(`mapvote_modal_cooldown_${serverNum}`)
+                    .setTitle('Set Map Cooldown Votes')
+                    .addComponents(
+                        new ActionRowBuilder().addComponents(
+                            new TextInputBuilder()
+                                .setCustomId('value')
+                                .setLabel('Votes map stays out after being played')
+                                .setStyle(TextInputStyle.Short)
+                                .setValue(String(service.excludeRecentMaps ?? 3))
                                 .setRequired(true)
                         )
                     );
@@ -999,6 +1016,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             // Determine server
             let serverNum = 1;
+            if (customId.startsWith('mapvote_modal_')) {
+                const parsedServerNum = parseInt(customId.split('_').pop(), 10);
+                if (!Number.isNaN(parsedServerNum)) {
+                    serverNum = parsedServerNum;
+                }
+            }
             const service = mapVotingServices[serverNum];
             const crcon = crconServices[serverNum];
             const config = configManager.getEffectiveServerConfig(serverNum);
@@ -1010,17 +1033,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             await interaction.deferUpdate();
 
-            if (customId === 'mapvote_modal_activate') {
+            if (customId.startsWith('mapvote_modal_activate_')) {
                 service.setConfig('minimumPlayers', value);
             }
-            else if (customId === 'mapvote_modal_deactivate') {
+            else if (customId.startsWith('mapvote_modal_deactivate_')) {
                 service.setConfig('deactivatePlayers', value);
             }
-            else if (customId === 'mapvote_modal_maps_count') {
+            else if (customId.startsWith('mapvote_modal_maps_count_')) {
                 service.setConfig('mapsPerVote', value);
             }
-            else if (customId === 'mapvote_modal_night_count') {
+            else if (customId.startsWith('mapvote_modal_night_count_')) {
                 service.setConfig('nightMapCount', value);
+            }
+            else if (customId.startsWith('mapvote_modal_cooldown_')) {
+                service.setConfig('excludeRecentMaps', value);
+                configManager.setServerConfig(serverNum, {
+                    excludePlayedMapForXvotes: service.excludeRecentMaps
+                });
             }
 
             const panel = mapVotePanelService.buildSettingsPanel(service);
