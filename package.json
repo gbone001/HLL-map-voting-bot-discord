@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "description": "Frontline Democracy - Map Voting Bot for Hell Let Loose servers",
   "main": "src/index.js",
+  "engines": {
+    "node": "20.x"
+  },
+  "packageManager": "npm@10",
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js"
