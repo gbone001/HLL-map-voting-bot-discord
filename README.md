@@ -64,6 +64,7 @@ Optional:
 - `CRCON_API_URL`, `CRCON_API_TOKEN` (+ `_2`, `_3`, `_4`) - Optional pre-seed config via env
 - `SERVER_PROVIDER` (+ suffixes) - `crcon` (default) or `rcon`
 - `RCON_HOST`, `RCON_PORT`, `RCON_PASSWORD` (+ suffixes) - Direct RCON connection settings
+- `RCON_POLL_INTERVAL_MS` - RCON background poll interval (default: `5000`)
 - `MAP_VOTE_CHANNEL_ID` (+ suffixes) - Optional pre-seed channel mapping
 - `EXCLUDE_PLAYED_MAP_FOR_XVOTES` (+ suffixes) - Server default map cooldown fallback
 

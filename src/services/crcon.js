@@ -13,6 +13,8 @@ class CRCONService {
         this.serverName = serverName;
         this.supportsAutomod = true;
         this.supportsHistory = true;
+        this.supportsRecentLogs = true;
+        this.supportsDirectGameState = false;
         this.client = null;
 
         if (this.baseUrl && this.apiToken) {

@@ -8,6 +8,7 @@ const path = require('path');
 const logger = require('../utils/logger');
 const { getDataFilePath } = require('../utils/dataPath');
 const { RconConnection } = require('../rcon/connection');
+const { RconPoller } = require('./rconPoller');
 
 const STATE_PATH = getDataFilePath('rcon-state.json');
 
@@ -56,6 +57,69 @@ function firstString(...values) {
     return null;
 }
 
+function parseMapEntries(raw) {
+    if (Array.isArray(raw)) {
+        return raw;
+    }
+
+    if (raw && Array.isArray(raw.mAPS)) {
+        return raw.mAPS;
+    }
+
+    if (raw && Array.isArray(raw.maps)) {
+        return raw.maps;
+    }
+
+    if (raw && Array.isArray(raw.MapNames)) {
+        return raw.MapNames;
+    }
+
+    if (raw && Array.isArray(raw.map_names)) {
+        return raw.map_names;
+    }
+
+    return [];
+}
+
+function normalizeMapEntries(rawEntries) {
+    return parseMapEntries(rawEntries).map((entry) => {
+        if (typeof entry === 'string') {
+            const id = toMapId(entry);
+            return {
+                id,
+                pretty_name: toPrettyName(id),
+                game_mode: inferGameMode(id),
+                environment: inferEnvironment(id)
+            };
+        }
+
+        const id = toMapId(entry?.iD || entry?.id || entry?.name);
+        const environment = String(entry?.timeOfDay || '').toLowerCase();
+        return {
+            id,
+            pretty_name: entry?.name || toPrettyName(id),
+            game_mode: inferGameMode(entry?.gameMode || id),
+            environment: environment || inferEnvironment(id)
+        };
+    }).filter((m) => !!m.id);
+}
+
+function extractPlayers(rawPlayers) {
+    if (Array.isArray(rawPlayers)) {
+        return rawPlayers;
+    }
+
+    if (rawPlayers && Array.isArray(rawPlayers.players)) {
+        return rawPlayers.players;
+    }
+
+    if (rawPlayers && Array.isArray(rawPlayers.Players)) {
+        return rawPlayers.Players;
+    }
+
+    return [];
+}
+
 class RCONService {
     constructor(host, password, serverName = 'Server', port = 27015) {
         this.host = host;
@@ -64,8 +128,15 @@ class RCONService {
         this.port = Number(port) || 27015;
         this.supportsAutomod = false;
         this.supportsHistory = false;
+        this.supportsRecentLogs = false;
+        this.supportsDirectGameState = true;
         this.connection = null;
         this.state = this.loadState();
+        this.poller = new RconPoller({
+            name: `RCON Poller ${this.serverName}`,
+            intervalMs: Number(process.env.RCON_POLL_INTERVAL_MS) > 0 ? Number(process.env.RCON_POLL_INTERVAL_MS) : 5000,
+            fetcher: () => this.fetchSnapshot()
+        });
     }
 
     isConfigured() {
@@ -140,6 +211,7 @@ class RCONService {
     }
 
     close() {
+        this.stopBackgroundPolling();
         if (this.connection) {
             this.connection.close();
             this.connection = null;
@@ -203,69 +275,33 @@ class RCONService {
         throw new Error(`RCON provider does not support POST endpoint "${endpoint}"`);
     }
 
-    async getMaps() {
-        const sequence = await this.withConnection((conn) => conn.getMapSequence());
-        let mapNames = Array.isArray(sequence)
-            ? sequence
-            : sequence?.MapNames || sequence?.map_names || sequence?.maps || [];
+    startBackgroundPolling() {
+        this.poller.start();
+    }
 
-        if (!Array.isArray(mapNames) || mapNames.length === 0) {
-            const rotation = await this.withConnection((conn) => conn.getMapRotation());
-            mapNames = Array.isArray(rotation)
-                ? rotation
-                : rotation?.MapNames || rotation?.map_names || rotation?.maps || [];
+    stopBackgroundPolling() {
+        this.poller.stop();
+    }
+
+    async getSnapshot(forceRefresh = false) {
+        if (forceRefresh || !this.poller.getSnapshot()) {
+            await this.poller.pollNow();
         }
-
-        const uniqueMapNames = [...new Set(mapNames)];
-
-        const result = uniqueMapNames.map((name) => {
-            const id = toMapId(name);
-            return {
-                id,
-                pretty_name: toPrettyName(id),
-                game_mode: inferGameMode(id),
-                environment: inferEnvironment(id)
-            };
-        });
-
-        return { result };
+        return this.poller.getSnapshot();
     }
 
-    async getMapRotation() {
-        const rotation = await this.withConnection((conn) => conn.getMapRotation());
-        return { result: rotation };
-    }
-
-    async getCurrentMap() {
+    async fetchSnapshot() {
         const session = await this.withConnection((conn) => conn.getSessionInfo());
-        return {
-            result: {
-                map: firstString(
-                    session?.CurrentMapName,
-                    session?.currentMapName,
-                    session?.CurrentMap,
-                    session?.current_map
-                )
-            }
-        };
-    }
+        const playersRaw = await this.withConnection((conn) => conn.getPlayers());
+        const mapSequenceRaw = await this.withConnection((conn) => conn.getMapSequence()).catch(() => null);
+        const mapRotationRaw = await this.withConnection((conn) => conn.getMapRotation()).catch(() => null);
 
-    async getGameState() {
-        const session = await this.withConnection((conn) => conn.getSessionInfo());
-        return { result: session };
-    }
-
-    async getStatus() {
-        const [session, players] = await Promise.all([
-            this.withConnection((conn) => conn.getSessionInfo()),
-            this.withConnection((conn) => conn.getPlayers())
-        ]);
-
+        const players = extractPlayers(playersRaw);
         const playerCount = firstNumber(
-            players?.PlayerCount,
-            players?.playerCount,
-            players?.current_players,
-            Array.isArray(players) ? players.length : null
+            playersRaw?.PlayerCount,
+            playersRaw?.playerCount,
+            playersRaw?.current_players,
+            players.length
         ) || 0;
 
         const maxPlayers = firstNumber(
@@ -289,22 +325,91 @@ class RCONService {
             session?.Start
         ) || Math.floor(Date.now() / 1000);
 
+        const sequenceMaps = normalizeMapEntries(mapSequenceRaw);
+        const rotationMaps = normalizeMapEntries(mapRotationRaw);
+        const sourceMaps = sequenceMaps.length > 0 ? sequenceMaps : rotationMaps;
+        const maps = [];
+        const seen = new Set();
+        for (const map of sourceMaps) {
+            if (!seen.has(map.id)) {
+                seen.add(map.id);
+                maps.push(map);
+            }
+        }
+
         return {
-            result: {
-                name: firstString(session?.ServerName, session?.serverName, this.serverName) || this.serverName,
-                current_players: playerCount,
-                max_players: maxPlayers,
-                current_map: {
-                    name: currentMap,
-                    start: mapStart
+            fetchedAt: Date.now(),
+            session,
+            playersRaw,
+            players,
+            mapSequenceRaw,
+            mapRotationRaw,
+            maps,
+            status: {
+                result: {
+                    name: firstString(session?.ServerName, session?.serverName, this.serverName) || this.serverName,
+                    current_players: playerCount,
+                    max_players: maxPlayers,
+                    current_map: {
+                        name: currentMap,
+                        start: mapStart
+                    }
                 }
             }
         };
     }
 
+    async getMaps() {
+        const snapshot = await this.getSnapshot();
+        return { result: snapshot?.maps || [] };
+    }
+
+    async getMapRotation() {
+        const snapshot = await this.getSnapshot();
+        return { result: snapshot?.mapRotationRaw || {} };
+    }
+
+    async getCurrentMap() {
+        const snapshot = await this.getSnapshot();
+        const session = snapshot?.session || {};
+        return {
+            result: {
+                map: firstString(
+                    session?.CurrentMapName,
+                    session?.currentMapName,
+                    session?.CurrentMap,
+                    session?.current_map
+                )
+            }
+        };
+    }
+
+    async getGameState() {
+        const snapshot = await this.getSnapshot();
+        const session = snapshot?.session || {};
+        return {
+            result: {
+                ...session,
+                gameActive: true
+            }
+        };
+    }
+
+    async getStatus() {
+        const snapshot = await this.getSnapshot();
+        return snapshot?.status || {
+            result: {
+                name: this.serverName,
+                current_players: 0,
+                max_players: 100,
+                current_map: { name: null, start: Math.floor(Date.now() / 1000) }
+            }
+        };
+    }
+
     async getDetailedPlayers() {
-        const players = await this.withConnection((conn) => conn.getPlayers());
-        return { result: players };
+        const snapshot = await this.getSnapshot();
+        return { result: snapshot?.playersRaw || {} };
     }
 
     async setNextMap(mapId) {
@@ -442,7 +547,17 @@ class RCONService {
     }
 
     async getTeamSwitchCooldown() {
-        return { result: this.state.teamSwitchCooldown };
+        try {
+            const value = await this.withConnection((conn) => conn.execute('GetTeamSwitchCooldown', ''));
+            const normalized = firstNumber(value?.TeamSwitchTimer, value?.teamSwitchTimer, value);
+            if (normalized !== null) {
+                this.state.teamSwitchCooldown = normalized;
+                this.saveState();
+            }
+            return { result: normalized };
+        } catch {
+            return { result: this.state.teamSwitchCooldown };
+        }
     }
 
     async setTeamSwitchCooldown(minutes) {
@@ -478,7 +593,17 @@ class RCONService {
     }
 
     async getMaxPingAutokick() {
-        return { result: this.state.maxPingAutokick };
+        try {
+            const value = await this.withConnection((conn) => conn.execute('GetHighPingThreshold', ''));
+            const normalized = firstNumber(value?.HighPingThresholdMs, value?.highPingThresholdMs, value);
+            if (normalized !== null) {
+                this.state.maxPingAutokick = normalized;
+                this.saveState();
+            }
+            return { result: normalized };
+        } catch {
+            return { result: this.state.maxPingAutokick };
+        }
     }
 
     async setMaxPingAutokick(maxMs) {

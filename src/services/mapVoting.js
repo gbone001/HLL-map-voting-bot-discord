@@ -84,6 +84,7 @@ class MapVotingService {
         // Schedule tracking
         this.lastScheduleId = null;
         this.pendingScheduleTransition = false;
+        this.lastObservedMapStart = null;
     }
 
     // ==================== INITIALIZATION ====================
@@ -102,6 +103,9 @@ class MapVotingService {
 
             await this.getAllMaps();
             await this.getWhitelist();
+            if (this.crcon && typeof this.crcon.startBackgroundPolling === 'function') {
+                this.crcon.startBackgroundPolling();
+            }
 
             // Clean up old votes on startup
             voteStore.cleanup();
@@ -581,6 +585,31 @@ class MapVotingService {
     // ==================== GAME STATE ====================
 
     async getGameState() {
+        if (this.crcon?.supportsRecentLogs === false && typeof this.crcon.getStatus === 'function') {
+            try {
+                const status = await this.crcon.getStatus();
+                const currentMapStart = status?.result?.current_map?.start ?? null;
+
+                if (this.lastObservedMapStart === null) {
+                    this.lastObservedMapStart = currentMapStart;
+                    this.gameActive = true;
+                    return this.gameActive;
+                }
+
+                if (currentMapStart !== null && currentMapStart !== this.lastObservedMapStart) {
+                    this.lastObservedMapStart = currentMapStart;
+                    this.gameActive = false;
+                    return this.gameActive;
+                }
+
+                this.gameActive = true;
+                return this.gameActive;
+            } catch (error) {
+                logger.error(`[MapVoting S${this.serverNum}] Error getting fallback game state:`, error.message);
+                return this.gameActive;
+            }
+        }
+
         try {
             const payload = {
                 end: 10000,
@@ -1235,6 +1264,9 @@ class MapVotingService {
 
     stop() {
         this.stopPolling();
+        if (this.crcon && typeof this.crcon.stopBackgroundPolling === 'function') {
+            this.crcon.stopBackgroundPolling();
+        }
         this.voteMapActive = false;
         this.isRunning = false;
         this.voteActive = false;

@@ -22,6 +22,7 @@ class RconConnection {
         this.authToken = null;
         this.nextId = 1;
         this.activeDataHandler = null;
+        this.requestChain = Promise.resolve();
     }
 
     async connect() {
@@ -99,6 +100,19 @@ class RconConnection {
     }
 
     async sendRequest(request, encrypted = true) {
+        const run = async () => this.sendRequestInternal(request, encrypted);
+        const queued = this.requestChain
+            .catch(() => {
+                // Keep the queue alive even if a previous request failed.
+            })
+            .then(run);
+        this.requestChain = queued.catch(() => {
+            // swallow for queue continuity
+        });
+        return queued;
+    }
+
+    async sendRequestInternal(request, encrypted = true) {
         if (this.closed) {
             throw new Error('Connection closed');
         }
