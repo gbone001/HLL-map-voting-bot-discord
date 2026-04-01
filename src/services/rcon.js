@@ -40,6 +40,9 @@ function inferEnvironment(mapId) {
 
 function firstNumber(...values) {
     for (const value of values) {
+        if (value === null || value === undefined || value === '') {
+            continue;
+        }
         const num = Number(value);
         if (Number.isFinite(num)) {
             return num;
@@ -323,7 +326,7 @@ class RCONService {
             session?.currentMapStart,
             session?.start,
             session?.Start
-        ) || Math.floor(Date.now() / 1000);
+        );
 
         const sequenceMaps = normalizeMapEntries(mapSequenceRaw);
         const rotationMaps = normalizeMapEntries(mapRotationRaw);
@@ -402,7 +405,7 @@ class RCONService {
                 name: this.serverName,
                 current_players: 0,
                 max_players: 100,
-                current_map: { name: null, start: Math.floor(Date.now() / 1000) }
+                current_map: { name: null, start: null }
             }
         };
     }

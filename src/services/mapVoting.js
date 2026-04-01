@@ -84,6 +84,7 @@ class MapVotingService {
         // Schedule tracking
         this.lastScheduleId = null;
         this.pendingScheduleTransition = false;
+        this.lastObservedMapName = null;
         this.lastObservedMapStart = null;
     }
 
@@ -397,6 +398,13 @@ class MapVotingService {
     }
 
     async applyScheduleAutomods(schedule) {
+        if (this.crcon?.supportsAutomod === false) {
+            logger.info(
+                `[MapVoting S${this.serverNum}] Skipping schedule automod apply for "${schedule?.scheduleName || 'unknown'}" (provider does not support automods)`
+            );
+            return;
+        }
+
         const configs = schedule?.automodConfigs || {};
         const profiles = schedule?.automodProfiles || {};
 
@@ -588,16 +596,46 @@ class MapVotingService {
         if (this.crcon?.supportsRecentLogs === false && typeof this.crcon.getStatus === 'function') {
             try {
                 const status = await this.crcon.getStatus();
-                const currentMapStart = status?.result?.current_map?.start ?? null;
+                const currentMapNameRaw = status?.result?.current_map?.name;
+                const currentMapName = typeof currentMapNameRaw === 'string'
+                    ? currentMapNameRaw.trim().toLowerCase()
+                    : null;
+                const currentMapStartRaw = status?.result?.current_map?.start;
+                const hasNumericStart =
+                    currentMapStartRaw !== null &&
+                    currentMapStartRaw !== undefined &&
+                    currentMapStartRaw !== '' &&
+                    Number.isFinite(Number(currentMapStartRaw));
+                const currentMapStart = hasNumericStart ? Number(currentMapStartRaw) : null;
 
-                if (this.lastObservedMapStart === null) {
+                if (this.lastObservedMapName === null) {
+                    this.lastObservedMapName = currentMapName;
                     this.lastObservedMapStart = currentMapStart;
                     this.gameActive = true;
                     return this.gameActive;
                 }
 
-                if (currentMapStart !== null && currentMapStart !== this.lastObservedMapStart) {
+                const mapChanged =
+                    currentMapName &&
+                    this.lastObservedMapName &&
+                    currentMapName !== this.lastObservedMapName;
+
+                const mapStartChanged =
+                    currentMapName &&
+                    this.lastObservedMapName &&
+                    currentMapName === this.lastObservedMapName &&
+                    currentMapStart !== null &&
+                    this.lastObservedMapStart !== null &&
+                    currentMapStart !== this.lastObservedMapStart;
+
+                if (currentMapName) {
+                    this.lastObservedMapName = currentMapName;
+                }
+                if (currentMapStart !== null) {
                     this.lastObservedMapStart = currentMapStart;
+                }
+
+                if (mapChanged || mapStartChanged) {
                     this.gameActive = false;
                     return this.gameActive;
                 }
@@ -1196,6 +1234,8 @@ class MapVotingService {
         this.lastReminderTime = null;
         this.sendSeedingMessage = true;
         this.seeded = false;
+        this.lastObservedMapName = null;
+        this.lastObservedMapStart = null;
     }
 
     getStatus() {
