@@ -1,87 +1,90 @@
-# Seeding Bot
+# HLL Map Vote Bot
 
-Standalone Discord bot for Hell Let Loose seeding management and map voting with CRCON integration.
+Discord bot for Hell Let Loose seeding + map voting with schedules, automods, and per-schedule server overrides. Supports CRCON and in-progress direct RCON provider mode.
 
-## Features
+## Highlights
 
-- Automatic map voting when server reaches minimum players
-- Discord poll-based voting
-- CRCON whitelist integration
+- Automatic map voting when player threshold is reached
+- Discord poll voting flow
+- Schedule manager with day/time presets, override mode, and per-schedule map pools
+- Per-schedule automod configuration (Level / No Leader / No Solo Tank)
+- Per-schedule general settings overrides:
+  - Team Switch Cooldown
+  - Idle Autokick Time
+  - Max Ping Autokick
+  - Map Vote Cooldown (votes to exclude recently played maps)
+- Schedule export:
+  - Single schedule export
+  - Export all schedules
+  - Includes maps, automods summary, and general settings summary
 - Multi-server support (up to 4 servers)
-- Admin control panel with buttons
-- Map whitelist management
-- Configurable settings
+- Persistent data path selection (`DATA_DIR` -> `/data` -> local `./data`)
 
-## Setup
+## Slash Commands
 
-1. Clone or copy this folder
-2. Install dependencies:
+This bot uses slash commands (not legacy `!` commands):
+
+- `/mapvote setup` - Open setup wizard (Server Owner/Admin)
+- `/mapvote panel [server]` - Open control panel
+- `/mapvote start [server]` - Start map voting
+- `/mapvote stop [server]` - Stop map voting
+- `/mapvote status [server]` - Show status
+- `/mapvote help` - Help text
+
+## Quick Start
+
+1. Install dependencies:
    ```bash
    npm install
    ```
-3. Copy `.env.example` to `.env` and fill in your values:
-   ```bash
-   cp .env.example .env
-   ```
-4. Start the bot:
+2. Create `.env` from `.env.example` and set at minimum:
+   - `DISCORD_TOKEN`
+3. Start:
    ```bash
    npm start
    ```
+4. In Discord, run `/mapvote setup` and configure server(s).
 
-## Railway Deployment
+## Railway Notes
 
-This project is ready for Railway with `railway.json`.
-
-1. Create a new Railway project from this repo
-2. Set environment variables in Railway:
-   - `DISCORD_TOKEN` (required)
-   - `CRCON_API_URL` and `CRCON_API_TOKEN` (or configure via setup wizard)
-   - optional multi-server vars: `CRCON_API_URL_2`, `CRCON_API_TOKEN_2`, etc.
-3. Deploy with start command `npm start`
-
-Notes:
-- Railway injects `PORT`; the bot exposes a health endpoint on `/health`.
-- Health responses return `503` until Discord login is ready, then `200`.
+- `railway.json` is included.
+- Health endpoint runs on `PORT` and responds on `/`, `/health`, `/ready`.
+- For persistent config/schedules/votes, mount a volume at `/data` (or set `DATA_DIR`).
 
 ## Environment Variables
 
-| Variable | Description |
-|----------|-------------|
-| `DISCORD_TOKEN` | Your Discord bot token |
-| `GUILD_ID` | Your Discord server ID |
-| `MAP_VOTE_CHANNEL_ID` | Channel for Server 1 map voting |
-| `ADMIN_CHANNEL_ID` | Channel for admin commands |
-| `CRCON_API_URL` | CRCON API URL for Server 1 |
-| `CRCON_API_TOKEN` | CRCON API token for Server 1 |
-| `EXCLUDE_PLAYED_MAP_FOR_XVOTES` | How many completed votes a map must sit out before it can return (default: 3) |
+Minimum:
 
-For additional servers, add `_2`, `_3`, `_4` suffixes (e.g., `MAP_VOTE_CHANNEL_ID_2`, `EXCLUDE_PLAYED_MAP_FOR_XVOTES_2`).
+- `DISCORD_TOKEN` - Discord bot token
 
-## Commands
+Optional:
 
-| Command | Description |
-|---------|-------------|
-| `!mapvote panel [server]` | Show the control panel |
-| `!mapvote start [server]` | Start map voting |
-| `!mapvote stop [server]` | Stop map voting |
-| `!mapvote status [server]` | Show current status |
-| `!mapvote help` | Show help |
+- `GUILD_ID` - Speeds up slash command refresh in your main guild
+- `DATA_DIR` - Override data directory path
+- `CRCON_API_URL`, `CRCON_API_TOKEN` (+ `_2`, `_3`, `_4`) - Optional pre-seed config via env
+- `SERVER_PROVIDER` (+ suffixes) - `crcon` (default) or `rcon`
+- `RCON_HOST`, `RCON_PORT`, `RCON_PASSWORD` (+ suffixes) - Direct RCON connection settings
+- `MAP_VOTE_CHANNEL_ID` (+ suffixes) - Optional pre-seed channel mapping
+- `EXCLUDE_PLAYED_MAP_FOR_XVOTES` (+ suffixes) - Server default map cooldown fallback
 
-## Control Panel
+Suffix examples:
+- Server 1: `RCON_HOST`, `SERVER_PROVIDER`
+- Server 2: `RCON_HOST_2`, `SERVER_PROVIDER_2`
 
-Use `!mapvote panel` to show an interactive control panel with:
-- Start/Pause voting
-- Whitelist management
-- Settings configuration
-- Vote/whitelist reset
+RCON mode notes:
+- General settings commands (team switch cooldown, idle kick, max ping) are wired directly to RCON.
+- Map sequence and map change flows are wired.
+- CRCON-specific automod endpoints are not available in direct RCON mode yet.
 
-## Configuration
+## Control Panel Areas
 
-Default settings can be changed via the control panel:
-- **Minimum Players**: Player count to activate voting (default: 50)
-- **Deactivate Players**: Player count to deactivate voting (default: 40)
-- **Maps Per Vote**: Number of maps in each vote (default: 8)
-- **Night Map Count**: Number of night maps per vote (default: 1)
+- Main panel: start/stop, settings, whitelist/blacklist, schedules, automods, export
+- Schedule Manager:
+  - Add/edit/delete schedules
+  - Manage maps per schedule
+  - General settings per schedule
+  - Automods per schedule
+  - Export single/all schedules
 
 ## License
 

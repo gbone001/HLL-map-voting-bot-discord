@@ -5,7 +5,6 @@
  */
 
 const logger = require('../utils/logger');
-const { crconService } = require('./crcon');
 const scheduleManager = require('./scheduleManager');
 const automodPresetManager = require('./automodPresetManager');
 const voteStore = require('./voteStore');
@@ -683,6 +682,19 @@ class MapVotingService {
         return recentMapIds;
     }
 
+    getLocalRoundHistory() {
+        return voteStore.getState(`recent_map_rounds_${this.serverNum}`) || [];
+    }
+
+    appendLocalRoundHistory(mapId) {
+        const history = this.getLocalRoundHistory();
+        history.unshift({
+            id: mapId,
+            recordedAt: Date.now()
+        });
+        voteStore.setState(`recent_map_rounds_${this.serverNum}`, history.slice(0, 50));
+    }
+
     async getMapsToVote() {
         try {
             const allMaps = await this.getAllMaps();
@@ -694,18 +706,28 @@ class MapVotingService {
 
             // Get recent maps to exclude
             let recentMapIds = new Set();
+            let usedProviderHistory = false;
             try {
                 const historyResponse = await this.crcon.getMapHistory();
                 if (historyResponse?.result && Array.isArray(historyResponse.result)) {
                     // Get the last N maps played (excludeRecentMaps setting)
                     const recentMaps = historyResponse.result.slice(0, this.excludeRecentMaps);
                     recentMapIds = this.getRecentMapIds(recentMaps, canonicalMapLookup);
+                    usedProviderHistory = true;
                     if (recentMapIds.size > 0) {
                         logger.info(`[MapVoting S${this.serverNum}] Excluding ${recentMapIds.size} recent map IDs: ${[...recentMapIds].join(', ')}`);
                     }
                 }
             } catch (e) {
                 logger.warn(`[MapVoting S${this.serverNum}] Could not fetch map history: ${e.message}`);
+            }
+
+            if (!usedProviderHistory && this.excludeRecentMaps > 0) {
+                const recentRounds = this.getLocalRoundHistory().slice(0, this.excludeRecentMaps);
+                recentMapIds = this.getRecentMapIds(recentRounds, canonicalMapLookup);
+                if (recentMapIds.size > 0) {
+                    logger.info(`[MapVoting S${this.serverNum}] Excluding ${recentMapIds.size} local recent map IDs: ${[...recentMapIds].join(', ')}`);
+                }
             }
 
             // Use effective whitelist (schedule's or CRCON's)
@@ -899,6 +921,7 @@ class MapVotingService {
             if (mapId) {
                 logger.info(`[MapVoting S${this.serverNum}] Setting next map: ${mapId}`);
                 await this.crcon.post('set_map_rotation', { map_names: [mapId] });
+                this.appendLocalRoundHistory(mapId);
             } else {
                 logger.warn(`[MapVoting S${this.serverNum}] Could not determine next map`);
             }

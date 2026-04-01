@@ -113,8 +113,12 @@ class ConfigManager {
         };
 
         // Environment variable names
+        const envProvider = normalizeEnvValue(process.env[`SERVER_PROVIDER${suffix}`]);
         const envUrl = normalizeEnvValue(process.env[`CRCON_API_URL${suffix}`]);
         const envToken = normalizeEnvValue(process.env[`CRCON_API_TOKEN${suffix}`]);
+        const envRconHost = normalizeEnvValue(process.env[`RCON_HOST${suffix}`]);
+        const envRconPassword = normalizeEnvValue(process.env[`RCON_PASSWORD${suffix}`]);
+        const envRconPort = normalizeEnvValue(process.env[`RCON_PORT${suffix}`]);
         const envChannel = normalizeEnvValue(process.env[`MAP_VOTE_CHANNEL_ID${suffix}`]);
         const envExclude = normalizeEnvValue(
             process.env[`EXCLUDE_PLAYED_MAP_FOR_XVOTES${suffix}`] ?? process.env.EXCLUDE_PLAYED_MAP_FOR_XVOTES
@@ -130,14 +134,35 @@ class ConfigManager {
         const excludeFromConfig = saved?.excludePlayedMapForXvotes;
         const excludeFromEnv = parseExcludeValue(envExclude);
         const excludePlayedMapForXvotes = excludeFromEnv ?? excludeFromConfig ?? 3;
+        const savedProvider = normalizeEnvValue(saved?.provider);
+        const provider = (envProvider || savedProvider || (
+            (envRconHost || saved?.rconHost) && (envRconPassword || saved?.rconPassword)
+                ? 'rcon'
+                : 'crcon'
+        )).toLowerCase();
+
+        const parsePort = (value, fallback) => {
+            const parsed = parseInt(value, 10);
+            if (Number.isNaN(parsed) || parsed <= 0 || parsed > 65535) return fallback;
+            return parsed;
+        };
+
+        const rconPort = parsePort(envRconPort ?? saved?.rconPort, 27015);
+        const crconConfigured = !!(envUrl || saved?.crconUrl) && !!(envToken || saved?.crconToken);
+        const rconConfigured = !!(envRconHost || saved?.rconHost) && !!(envRconPassword || saved?.rconPassword);
+        const configured = provider === 'rcon' ? rconConfigured : crconConfigured;
 
         // Merge: env overrides saved config
         return {
+            provider,
             crconUrl: envUrl || saved?.crconUrl,
             crconToken: envToken || saved?.crconToken,
+            rconHost: envRconHost || saved?.rconHost,
+            rconPassword: envRconPassword || saved?.rconPassword,
+            rconPort,
             channelId: envChannel || saved?.channelId,
             serverName: saved?.serverName || `Server ${serverNum}`,
-            configured: !!(envUrl || saved?.crconUrl) && !!(envToken || saved?.crconToken),
+            configured,
             excludePlayedMapForXvotes
         };
     }

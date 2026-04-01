@@ -11,6 +11,8 @@ class CRCONService {
         this.baseUrl = baseUrl?.replace(/\/$/, ''); // Remove trailing slash
         this.apiToken = apiToken;
         this.serverName = serverName;
+        this.supportsAutomod = true;
+        this.supportsHistory = true;
         this.client = null;
 
         if (this.baseUrl && this.apiToken) {

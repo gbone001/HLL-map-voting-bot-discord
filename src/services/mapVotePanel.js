@@ -174,10 +174,17 @@ class MapVotePanelService {
                 inline: true
             });
 
-            // CRCON Votemap Status
+            const providerLabel = crconService?.constructor?.name === 'RCONService' ? 'RCON' : 'CRCON';
+            embed.addFields({
+                name: '🔌 Provider',
+                value: `**Mode:** ${providerLabel}`,
+                inline: true
+            });
+
+            // Provider Votemap Status
             if (votemapConfig) {
                 embed.addFields({
-                    name: '🖥️ CRCON Votemap',
+                    name: '🖥️ Server Votemap',
                     value: `**Enabled:** ${votemapConfig.enabled ? '✅ Yes' : '❌ No'}\n` +
                            `**Default Method:** ${votemapConfig.default_method || 'N/A'}\n` +
                            `**Num Options:** ${votemapConfig.num_options || 'N/A'}\n` +
@@ -245,12 +252,12 @@ class MapVotePanelService {
 
                 if (sched.isOverride) {
                     scheduleValue = `**${sched.name}** (Override)\n`;
-                    scheduleValue += sched.hasCustomWhitelist ? '*Custom map pool*' : '*Using CRCON whitelist*';
+                    scheduleValue += sched.hasCustomWhitelist ? '*Custom map pool*' : '*Using server whitelist*';
                 } else if (sched.isDefault) {
                     scheduleValue = '**Default**\n*No schedule active*';
                 } else {
                     scheduleValue = `**${sched.name}**\n`;
-                    scheduleValue += sched.hasCustomWhitelist ? '*Custom map pool*' : '*Using CRCON whitelist*';
+                    scheduleValue += sched.hasCustomWhitelist ? '*Custom map pool*' : '*Using server whitelist*';
                 }
 
                 if (config.pendingScheduleTransition) {
@@ -273,6 +280,12 @@ class MapVotePanelService {
             );
 
             embed.setFooter({ text: 'HLL Map Vote Bot • Use the buttons below to manage' });
+            const supportsAutomod = !!crconService &&
+                crconService.supportsAutomod !== false &&
+                typeof crconService.getAutoModLevelConfig === 'function';
+            const supportsHistory = !!crconService &&
+                crconService.supportsHistory !== false &&
+                typeof crconService.getMapHistory === 'function';
 
             // Control buttons - Row 1
             const row1 = new ActionRowBuilder().addComponents(
@@ -309,12 +322,14 @@ class MapVotePanelService {
                     .setCustomId('mapvote_history')
                     .setLabel('History')
                     .setEmoji('📜')
-                    .setStyle(ButtonStyle.Secondary),
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(!supportsHistory),
                 new ButtonBuilder()
                     .setCustomId('mapvote_automods')
                     .setLabel('Automods')
                     .setEmoji('🤖')
-                    .setStyle(ButtonStyle.Secondary),
+                    .setStyle(ButtonStyle.Secondary)
+                    .setDisabled(!supportsAutomod),
                 new ButtonBuilder()
                     .setCustomId('mapvote_export_schedule')
                     .setLabel('Export Schedule')
@@ -719,7 +734,7 @@ class MapVotePanelService {
             .setTitle(`🤖 Automods - ${serverName}`)
             .setColor(0x5865F2)
             .setDescription(
-                'Manage CRCON automod modules.\n\n' +
+                'Manage server automod modules.\n\n' +
                 'Choose a module below:\n' +
                 '• Level - General Settings\n' +
                 '• Level - Role Levels\n' +
@@ -761,7 +776,7 @@ class MapVotePanelService {
             .setColor(0xE67E22)
             .setDescription(
                 `Source: **${source}**\n` +
-                'Select a field from the dropdown to edit it, then click **Commit Changes** to apply to CRCON.\n\n' +
+                'Select a field from the dropdown to edit it, then click **Commit Changes** to apply to the server provider.\n\n' +
                 this.buildSoloTankConfigTable(draftConfig)
             )
             .setFooter({ text: 'Edits are local until Commit Changes is pressed' });
@@ -914,7 +929,7 @@ class MapVotePanelService {
             .setColor(0x1ABC9C)
             .setDescription(
                 `Source: **${source}**\n` +
-                'Select a field from the dropdown to edit it, then click **Commit Changes** to apply to CRCON.\n\n' +
+                'Select a field from the dropdown to edit it, then click **Commit Changes** to apply to the server provider.\n\n' +
                 this.buildNoLeaderConfigTable(draftConfig)
             )
             .setFooter({ text: 'Edits are local until Commit Changes is pressed' });

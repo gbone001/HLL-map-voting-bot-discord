@@ -9,7 +9,7 @@ require('dotenv').config();
 const http = require('http');
 const { Client, GatewayIntentBits, Partials, Events, ModalBuilder, TextInputBuilder, TextInputStyle, ActionRowBuilder, MessageFlags, PermissionFlagsBits } = require('discord.js');
 const logger = require('./utils/logger');
-const { CRCONService } = require('./services/crcon');
+const { createServerProvider } = require('./services/serverProviderFactory');
 const { MapVotingService } = require('./services/mapVoting');
 const { MapVotePanelService } = require('./services/mapVotePanel');
 const configManager = require('./services/configManager');
@@ -114,8 +114,8 @@ async function initializeServers() {
         const config = configManager.getEffectiveServerConfig(serverNum);
 
         if (config.configured && config.channelId) {
-            // Create CRCON service
-            const crcon = new CRCONService(config.crconUrl, config.crconToken, config.serverName);
+            // Create server provider service (CRCON or RCON)
+            const crcon = createServerProvider(config, serverNum);
             crconServices[serverNum] = crcon;
 
             // Create map voting service
@@ -127,7 +127,7 @@ async function initializeServers() {
 
             if (success) {
                 mapVotingServices[serverNum] = service;
-                logger.info(`${config.serverName} Map Voting initialized`);
+                logger.info(`${config.serverName} Map Voting initialized via ${String(config.provider || 'crcon').toUpperCase()}`);
             } else {
                 logger.error(`${config.serverName} Map Voting failed to initialize`);
             }
@@ -341,6 +341,33 @@ function extractApiResultInt(response) {
     if (typeof response?.result === 'number') return response.result;
     if (typeof response === 'number') return response;
     return null;
+}
+
+function supportsAutomod(provider) {
+    return !!provider &&
+        provider.supportsAutomod !== false &&
+        typeof provider.getAutoModLevelConfig === 'function';
+}
+
+function supportsHistory(provider) {
+    return !!provider &&
+        provider.supportsHistory !== false &&
+        typeof provider.getMapHistory === 'function';
+}
+
+function getProviderModeLabel(provider) {
+    return provider?.constructor?.name === 'RCONService' ? 'RCON' : 'CRCON';
+}
+
+function buildScheduleManagerPanel(serverNum, serverName = null) {
+    const config = configManager.getEffectiveServerConfig(serverNum);
+    const resolvedServerName = serverName || config.serverName || `Server ${serverNum}`;
+    const provider = crconServices[serverNum] || crconServices[1] || null;
+
+    return schedulePanel.buildSchedulePanel(serverNum, resolvedServerName, {
+        supportsAutomod: supportsAutomod(provider),
+        providerLabel: getProviderModeLabel(provider)
+    });
 }
 
 async function getLiveGeneralSettings(crcon, serverNum = 1) {
@@ -675,6 +702,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             // Show history panel
             else if (customId === 'mapvote_history' || customId.startsWith('mapvote_history_')) {
+                if (!supportsHistory(crcon)) {
+                    return replyEphemeralAutoDelete(interaction, 'History is not available with the current server provider.');
+                }
                 await interaction.deferUpdate();
                 const panel = await mapVotePanelService.buildHistoryPanel(crcon);
                 await updatePanelMessage(interaction, panel);
@@ -682,6 +712,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
             // Show automods panel
             else if (customId === 'mapvote_automods' || customId.startsWith('mapvote_automods_')) {
+                if (!supportsAutomod(crcon)) {
+                    return replyEphemeralAutoDelete(interaction, 'Automods are not available with the current server provider.');
+                }
                 await interaction.deferUpdate();
                 const panel = mapVotePanelService.buildAutomodsPanel(serverNum, serverName);
                 await updatePanelMessage(interaction, panel);
@@ -922,7 +955,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             // ========== SCHEDULE BUTTONS ==========
             else if (customId === 'mapvote_schedules' || customId.startsWith('mapvote_schedules_')) {
                 await interaction.deferUpdate();
-                const panel = schedulePanel.buildSchedulePanel(serverNum, serverName);
+                const panel = buildScheduleManagerPanel(serverNum, serverName);
                 await updatePanelMessage(interaction, panel);
             }
 
@@ -938,6 +971,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
                 if (!automodCrcon || !automodService) {
                     return interaction.reply({ content: 'Service not available for Automods.', flags: MessageFlags.Ephemeral });
+                }
+                if (!supportsAutomod(automodCrcon)) {
+                    return replyEphemeralAutoDelete(interaction, 'Automods are not available with the current server provider.');
                 }
 
                 if (customId.startsWith('automod_back_')) {
@@ -1213,7 +1249,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 // Schedule back button
                 if (customId.startsWith('schedule_back_')) {
                     await interaction.deferUpdate();
-                    const panel = schedulePanel.buildSchedulePanel(schedServerNum, serverName);
+                    const panel = buildScheduleManagerPanel(schedServerNum, serverName);
                     await updatePanelMessage(interaction, panel);
                 }
 
@@ -1255,7 +1291,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 else if (customId.startsWith('schedule_clear_override_')) {
                     await interaction.deferUpdate();
                     scheduleManager.clearOverride(schedServerNum);
-                    const panel = schedulePanel.buildSchedulePanel(schedServerNum, serverName);
+                    const panel = buildScheduleManagerPanel(schedServerNum, serverName);
                     await updatePanelMessage(interaction, panel);
                     await interaction.followUp({ content: 'Override cleared.', flags: MessageFlags.Ephemeral });
                 }
@@ -1268,7 +1304,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
                     await interaction.deferUpdate();
                     scheduleManager.setOverride(srvNum, scheduleId, 'match');
-                    const panel = schedulePanel.buildSchedulePanel(srvNum, serverName);
+                    const panel = buildScheduleManagerPanel(srvNum, serverName);
                     await updatePanelMessage(interaction, panel);
                     await interaction.followUp({ content: 'Override set until match ends.', flags: MessageFlags.Ephemeral });
                 }
@@ -1292,7 +1328,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     await interaction.deferUpdate();
                     const days = scheduleManager.getDayPresets()[preset];
                     scheduleManager.updateSchedule(srvNum, scheduleId, { days });
-                    const panel = schedulePanel.buildSchedulePanel(srvNum, serverName);
+                    const panel = buildScheduleManagerPanel(srvNum, serverName);
                     await updatePanelMessage(interaction, panel);
                     await interaction.followUp({ content: `Days set to ${preset}.`, flags: MessageFlags.Ephemeral });
                 }
@@ -1416,6 +1452,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     const idParts = customId.split('_');
                     const srvNum = parseInt(idParts[idParts.length - 2], 10);
                     const scheduleId = idParts[idParts.length - 1];
+                    const scheduleProvider = crconServices[srvNum] || crconServices[1];
+                    if (!supportsAutomod(scheduleProvider)) {
+                        return replyEphemeralAutoDelete(interaction, 'Schedule automods are not available with the current server provider.');
+                    }
                     await interaction.deferUpdate();
                     const panel = schedulePanel.buildScheduleAutomodAttachPanel(srvNum, scheduleId);
                     await updatePanelMessage(interaction, panel);
@@ -1432,6 +1472,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         return replyEphemeralAutoDelete(interaction, 'Schedule not found.');
                     }
                     const crcon = crconServices[srvNum] || crconServices[1];
+                    if (!supportsAutomod(crcon)) {
+                        return replyEphemeralAutoDelete(interaction, 'Schedule automods are not available with the current server provider.');
+                    }
                     const draftKey = getScheduleAutoModDraftKey(srvNum, scheduleId, interaction.user.id);
                     const draftMap = getScheduleAutoModDraftMap(moduleType);
 
@@ -1492,6 +1535,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     }
 
                     const crcon = crconServices[srvNum] || crconServices[1];
+                    if (!supportsAutomod(crcon)) {
+                        return replyEphemeralAutoDelete(interaction, 'Schedule automods are not available with the current server provider.');
+                    }
                     const currentConfigs = schedule.automodConfigs || {};
                     let nextModuleConfig = null;
                     if (!currentConfigs[moduleType]) {
@@ -1533,7 +1579,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     const moduleType = idParts.slice(3, idParts.length - 2).join('_').replace('refresh_', '');
                     const crcon = crconServices[srvNum] || crconServices[1];
                     if (!crcon) {
-                        return replyEphemeralAutoDelete(interaction, 'CRCON service unavailable for this server.');
+                        return replyEphemeralAutoDelete(interaction, 'Server provider unavailable for this server.');
                     }
 
                     await interaction.deferUpdate();
@@ -1687,8 +1733,12 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
                 // Schedule automods - show schedule selection
                 else if (customId.startsWith('schedule_automods_')) {
-                    await interaction.deferUpdate();
                     const srvNum = parseInt(customId.split('_').pop());
+                    const scheduleProvider = crconServices[srvNum] || crconServices[1];
+                    if (!supportsAutomod(scheduleProvider)) {
+                        return replyEphemeralAutoDelete(interaction, 'Schedule automods are not available with the current server provider.');
+                    }
+                    await interaction.deferUpdate();
                     const panel = schedulePanel.buildScheduleAutomodSelectPanel(srvNum);
                     await updatePanelMessage(interaction, panel);
                 }
@@ -1699,7 +1749,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 const schedWlServerNum = getScheduleWhitelistServerNum(customId);
                 const crcon = schedWlServerNum ? crconServices[schedWlServerNum] : null;
                 if (!crcon) {
-                    return interaction.reply({ content: 'CRCON service not available.', flags: MessageFlags.Ephemeral });
+                    return interaction.reply({ content: 'Server provider not available.', flags: MessageFlags.Ephemeral });
                 }
 
                 // Parse common parts
@@ -1831,7 +1881,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 const srvNum = parseInt(customId.split('_').pop());
                 const timezone = interaction.values[0];
                 scheduleManager.setTimezone(srvNum, timezone);
-                await interaction.update(schedulePanel.buildSchedulePanel(srvNum));
+                await interaction.update(buildScheduleManagerPanel(srvNum));
                 await interaction.followUp({
                     content: `Timezone set to ${timezone}.`,
                     flags: MessageFlags.Ephemeral
@@ -1853,7 +1903,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 const schedules = scheduleManager.getSchedules(srvNum);
                 const schedule = schedules.find(s => s.id === scheduleId);
                 scheduleManager.deleteSchedule(srvNum, scheduleId);
-                await interaction.update(schedulePanel.buildSchedulePanel(srvNum));
+                await interaction.update(buildScheduleManagerPanel(srvNum));
                 await interaction.followUp({
                     content: `Schedule "${schedule?.name || 'Unknown'}" deleted.`,
                     flags: MessageFlags.Ephemeral
@@ -2026,7 +2076,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 const serverName = config.serverName || `Server ${srvNum}`;
 
                 if (!crcon) {
-                    return interaction.reply({ content: 'CRCON service not available for export.', flags: MessageFlags.Ephemeral });
+                    return interaction.reply({ content: 'Server provider not available for export.', flags: MessageFlags.Ephemeral });
                 }
                 if (!service) {
                     return interaction.reply({ content: 'Map voting service not available for export.', flags: MessageFlags.Ephemeral });
@@ -2325,7 +2375,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                         const panel = schedulePanel.buildDaySelectPanel(srvNum, result.schedule.id);
                         await updatePanelMessage(interaction, panel, { preferMessageEdit: true });
                     } else {
-                        const panel = schedulePanel.buildSchedulePanel(srvNum);
+                        const panel = buildScheduleManagerPanel(srvNum);
                         await updatePanelMessage(interaction, panel, { preferMessageEdit: true });
                     }
                 } else {
@@ -2350,7 +2400,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
                 scheduleManager.setOverride(srvNum, scheduleId, 'hours', hours);
                 await interaction.editReply({ content: `Override set for ${hours} hour(s).` });
-                const panel = schedulePanel.buildSchedulePanel(srvNum);
+                const panel = buildScheduleManagerPanel(srvNum);
                 await updatePanelMessage(interaction, panel, { preferMessageEdit: true });
                 return;
             }

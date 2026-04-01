@@ -45,6 +45,16 @@ class SchedulePanelService {
         return Object.values(generalSettings).some(value => value !== null && value !== undefined);
     }
 
+    hasScheduleSpecificAutomodSettings(schedule) {
+        const automodConfigs = schedule?.automodConfigs || {};
+        const automodProfiles = schedule?.automodProfiles || {};
+        return ['level', 'no_leader', 'solo_tank'].some((key) => {
+            const config = automodConfigs[key];
+            const profile = automodProfiles[key];
+            return !!profile || (config && typeof config === 'object');
+        });
+    }
+
     buildGeneralSettingsExportLines(schedule) {
         const generalSettings = {
             ...this.getDefaultScheduleGeneralSettings(),
@@ -93,12 +103,15 @@ class SchedulePanelService {
     /**
      * Build main schedule management panel
      */
-    buildSchedulePanel(serverNum, serverName = 'Server') {
+    buildSchedulePanel(serverNum, serverName = 'Server', options = {}) {
         const config = scheduleManager.getServerConfig(serverNum);
         const schedules = scheduleManager.getSchedules(serverNum);
         const activeSchedule = scheduleManager.getActiveSchedule(serverNum);
         const { time, day, timezone } = scheduleManager.getCurrentTime(serverNum);
         const hasAnyScheduleGeneralOverrides = schedules.some(schedule => this.hasScheduleSpecificGeneralSettings(schedule));
+        const hasAnyScheduleAutomodOverrides = schedules.some(schedule => this.hasScheduleSpecificAutomodSettings(schedule));
+        const supportsAutomod = options.supportsAutomod !== false;
+        const providerLabel = options.providerLabel || 'CRCON';
 
         const embed = new EmbedBuilder()
             .setTitle(`⏰ Schedule Manager - ${serverName}`)
@@ -129,6 +142,11 @@ class SchedulePanelService {
             name: '📊 Current Status',
             value: statusValue,
             inline: false
+        });
+        embed.addFields({
+            name: '🔌 Provider',
+            value: `**Mode:** ${providerLabel}`,
+            inline: true
         });
 
         // List schedules
@@ -165,7 +183,7 @@ class SchedulePanelService {
             '• Changes apply after current match ends'
         );
 
-        embed.setFooter({ text: 'Seeding Bot • Schedule Manager' });
+        embed.setFooter({ text: 'HLL Map Vote Bot • Schedule Manager' });
 
         // Buttons Row 1 - Schedule management
         const row1 = new ActionRowBuilder().addComponents(
@@ -206,8 +224,8 @@ class SchedulePanelService {
                 .setCustomId(`schedule_automods_${serverNum}`)
                 .setLabel('Edit Automods')
                 .setEmoji('🤖')
-                .setStyle(ButtonStyle.Secondary)
-                .setDisabled(schedules.length === 0)
+                .setStyle(hasAnyScheduleAutomodOverrides ? ButtonStyle.Success : ButtonStyle.Secondary)
+                .setDisabled(schedules.length === 0 || !supportsAutomod)
         );
 
         // Buttons Row 3 - Timezone/Override navigation
@@ -799,7 +817,7 @@ class SchedulePanelService {
 
         const options = schedules.map(schedule => {
             const whitelistInfo = schedule.whitelist === null
-                ? 'Using CRCON whitelist'
+                ? 'Using server whitelist'
                 : `${schedule.whitelist.length} included maps`;
             return {
                 label: schedule.name.substring(0, 100),
@@ -1063,7 +1081,7 @@ class SchedulePanelService {
             return { content: 'Schedule not found.' };
         }
 
-        // Get all maps from CRCON
+        // Get all maps from server provider
         let allMaps = [];
         try {
             const mapsResponse = await crconService.getMaps();
@@ -1109,7 +1127,7 @@ class SchedulePanelService {
             .setTitle(`🗺️ Schedule Whitelist - ${schedule.name}`)
             .setDescription(
                 (useAllMaps
-                    ? '**Mode:** Using ALL maps from CRCON whitelist\n\n'
+                    ? '**Mode:** Using ALL maps from server whitelist\n\n'
                     : `**Mode:** Custom whitelist (${scheduleWhitelist.size} maps)\n\n`) +
                 `**Legend:** ✅ = Included, ❌ = Excluded\n` +
                 `**Modes:** ⚔️ Warfare, 🎯 Offensive, 🔫 Skirmish\n` +
@@ -1423,12 +1441,12 @@ class SchedulePanelService {
         let sourceMode = 'Custom schedule whitelist';
 
         if (schedule.whitelist === null) {
-            sourceMode = 'CRCON whitelist (Use All Maps mode)';
+            sourceMode = 'Server whitelist (Use All Maps mode)';
             try {
                 const whitelistResponse = await crconService.getVotemapWhitelist();
                 includedMapIds = whitelistResponse?.result || [];
             } catch (e) {
-                logger.error('[SchedulePanel] Error fetching CRCON whitelist for export:', e);
+                logger.error('[SchedulePanel] Error fetching provider whitelist for export:', e);
                 includedMapIds = [];
             }
         } else {
@@ -1453,6 +1471,7 @@ class SchedulePanelService {
         const filename = `schedule-export-s${serverNum}-${safeName}.txt`;
 
         const contentLines = [
+            `Provider: ${crconService?.constructor?.name === 'RCONService' ? 'RCON' : 'CRCON'}`,
             'Schedule Export',
             '====================',
             `Server: ${serverName || `Server ${serverNum}`}`,
@@ -1505,7 +1524,7 @@ class SchedulePanelService {
             const whitelistResponse = await crconService.getVotemapWhitelist();
             crconWhitelist = whitelistResponse?.result || [];
         } catch (e) {
-            logger.error('[SchedulePanel] Error fetching CRCON whitelist for full export:', e);
+            logger.error('[SchedulePanel] Error fetching provider whitelist for full export:', e);
         }
 
         const sections = [];
@@ -1518,7 +1537,7 @@ class SchedulePanelService {
             totalMaps += uniqueMapIds.length;
 
             const sourceMode = schedule.whitelist === null
-                ? 'CRCON whitelist (Use All Maps mode)'
+                ? 'Server whitelist (Use All Maps mode)'
                 : 'Custom schedule whitelist';
 
             const lines = uniqueMapIds.map((mapId, index) => {
@@ -1547,6 +1566,7 @@ class SchedulePanelService {
         const exportedAt = new Date().toISOString();
         const filename = `schedule-export-all-s${serverNum}.txt`;
         const contentLines = [
+            `Provider: ${crconService?.constructor?.name === 'RCONService' ? 'RCON' : 'CRCON'}`,
             'Schedule Export (All Schedules)',
             '====================',
             `Server: ${serverName || `Server ${serverNum}`}`,

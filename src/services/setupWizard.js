@@ -15,6 +15,7 @@ const {
 } = require('discord.js');
 const axios = require('axios');
 const configManager = require('./configManager');
+const { RCONService } = require('./rcon');
 const logger = require('../utils/logger');
 
 class SetupWizard {
@@ -30,7 +31,7 @@ class SetupWizard {
 
         const embed = new EmbedBuilder()
             .setTitle('Seeding Bot Setup')
-            .setDescription('Configure your CRCON servers and permissions for map voting')
+            .setDescription('Configure your server providers (CRCON or RCON) and permissions for map voting')
             .setColor(serverCount > 0 ? 0x00FF00 : 0xFF6600);
 
         // Show admin role
@@ -45,15 +46,20 @@ class SetupWizard {
         if (serverCount > 0) {
             let serverList = '';
             for (const [num, config] of Object.entries(servers)) {
+                const provider = String(config.provider || 'crcon').toUpperCase();
+                const endpoint = config.provider === 'rcon'
+                    ? `${config.rconHost || 'Not set'}:${config.rconPort || 27015}`
+                    : (config.crconUrl || 'Not set');
                 serverList += `**Server ${num}** - ${config.serverName || 'Unnamed'}\n`;
-                serverList += `URL: \`${config.crconUrl || 'Not set'}\`\n`;
+                serverList += `Provider: \`${provider}\`\n`;
+                serverList += `Endpoint: \`${endpoint}\`\n`;
                 serverList += `Channel: ${config.channelId ? `<#${config.channelId}>` : '`Not set`'}\n\n`;
             }
             embed.addFields({ name: 'Configured Servers', value: serverList || 'None' });
         } else {
             embed.addFields({
                 name: 'Getting Started',
-                value: 'Click **Add Server** to configure your first HLL server.\n\nYou will need:\n- Your CRCON URL (e.g., `http://your-crcon.com:8010`)\n- Your CRCON API Token\n- A Discord channel ID for map voting'
+                value: 'Click **Add Server** to configure your first HLL server.\n\nYou will need:\n- Provider: `crcon` or `rcon`\n- Endpoint: CRCON URL or RCON host:port\n- Secret: CRCON API token or RCON password\n- A Discord channel ID for map voting'
             });
         }
 
@@ -184,7 +190,9 @@ class SetupWizard {
 
         const options = Object.entries(servers).map(([num, config]) => ({
             label: `Server ${num} - ${config.serverName || 'Unnamed'}`,
-            description: config.crconUrl || 'Not configured',
+            description: config.provider === 'rcon'
+                ? `RCON ${config.rconHost || 'not set'}:${config.rconPort || 27015}`
+                : (config.crconUrl || 'Not configured'),
             value: num
         }));
 
@@ -220,20 +228,32 @@ class SetupWizard {
             .setRequired(true)
             .setMaxLength(50);
 
-        const urlInput = new TextInputBuilder()
-            .setCustomId('crcon_url')
-            .setLabel('CRCON URL')
+        const providerInput = new TextInputBuilder()
+            .setCustomId('connection_provider')
+            .setLabel('Provider (crcon or rcon)')
             .setStyle(TextInputStyle.Short)
-            .setPlaceholder('http://your-crcon.com:8010')
-            .setValue(existingConfig?.crconUrl || '')
+            .setPlaceholder('crcon')
+            .setValue(existingConfig?.provider || 'crcon')
             .setRequired(true);
 
-        const tokenInput = new TextInputBuilder()
-            .setCustomId('crcon_token')
-            .setLabel('CRCON API Token')
+        const endpointInput = new TextInputBuilder()
+            .setCustomId('connection_endpoint')
+            .setLabel('Endpoint (CRCON URL or RCON host[:port])')
             .setStyle(TextInputStyle.Short)
-            .setPlaceholder('xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx')
-            .setValue(existingConfig?.crconToken || '')
+            .setPlaceholder('http://your-crcon.com:8010 OR 1.2.3.4:27015')
+            .setValue(existingConfig?.provider === 'rcon'
+                ? `${existingConfig?.rconHost || ''}${existingConfig?.rconPort ? `:${existingConfig.rconPort}` : ''}`
+                : (existingConfig?.crconUrl || ''))
+            .setRequired(true);
+
+        const secretInput = new TextInputBuilder()
+            .setCustomId('connection_secret')
+            .setLabel('Secret (CRCON token or RCON password)')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('API token or RCON password')
+            .setValue(existingConfig?.provider === 'rcon'
+                ? (existingConfig?.rconPassword || '')
+                : (existingConfig?.crconToken || ''))
             .setRequired(true);
 
         const channelInput = new TextInputBuilder()
@@ -246,8 +266,9 @@ class SetupWizard {
 
         modal.addComponents(
             new ActionRowBuilder().addComponents(nameInput),
-            new ActionRowBuilder().addComponents(urlInput),
-            new ActionRowBuilder().addComponents(tokenInput),
+            new ActionRowBuilder().addComponents(providerInput),
+            new ActionRowBuilder().addComponents(endpointInput),
+            new ActionRowBuilder().addComponents(secretInput),
             new ActionRowBuilder().addComponents(channelInput)
         );
 
@@ -262,13 +283,78 @@ class SetupWizard {
         return null; // Max 4 servers
     }
 
-    // Test CRCON connection
-    async testConnection(crconUrl, crconToken) {
+    parseProviderConfig(provider, endpointRaw, secretRaw) {
+        const normalizedProvider = String(provider || '').trim().toLowerCase();
+        const endpoint = String(endpointRaw || '').trim();
+        const secret = String(secretRaw || '').trim();
+
+        if (!['crcon', 'rcon'].includes(normalizedProvider)) {
+            return { valid: false, error: 'Provider must be `crcon` or `rcon`.' };
+        }
+
+        if (!endpoint) {
+            return { valid: false, error: 'Endpoint is required.' };
+        }
+
+        if (!secret) {
+            return { valid: false, error: 'Secret is required.' };
+        }
+
+        if (normalizedProvider === 'crcon') {
+            return {
+                valid: true,
+                provider: 'crcon',
+                crconUrl: endpoint.replace(/\/$/, ''),
+                crconToken: secret
+            };
+        }
+
+        const hostPortMatch = endpoint.match(/^(.+?)(?::(\d+))?$/);
+        const host = hostPortMatch?.[1]?.trim();
+        const port = hostPortMatch?.[2] ? parseInt(hostPortMatch[2], 10) : 27015;
+        if (!host) {
+            return { valid: false, error: 'RCON host is required.' };
+        }
+
+        return {
+            valid: true,
+            provider: 'rcon',
+            rconHost: host,
+            rconPort: Number.isNaN(port) ? 27015 : port,
+            rconPassword: secret
+        };
+    }
+
+    async testConnection(config) {
+        if (config.provider === 'rcon') {
+            let service = null;
+            try {
+                service = new RCONService(
+                    config.rconHost,
+                    config.rconPassword,
+                    config.serverName || 'Server',
+                    config.rconPort
+                );
+                const status = await service.getStatus();
+                const result = status?.result || {};
+                return {
+                    success: true,
+                    serverName: result.name || config.serverName || 'Unknown Server',
+                    players: result.current_players || 0,
+                    maxPlayers: result.max_players || 100
+                };
+            } catch (error) {
+                return { success: false, error: `RCON connection failed: ${error.message}` };
+            } finally {
+                service?.close();
+            }
+        }
+
         try {
-            const baseUrl = crconUrl.replace(/\/$/, '');
+            const baseUrl = config.crconUrl.replace(/\/$/, '');
             const response = await axios.get(`${baseUrl}/api/get_status`, {
                 headers: {
-                    'Authorization': `Bearer ${crconToken}`,
+                    'Authorization': `Bearer ${config.crconToken}`,
                     'Content-Type': 'application/json'
                 },
                 timeout: 10000
@@ -305,8 +391,13 @@ class SetupWizard {
         const results = [];
 
         for (const [num, config] of Object.entries(servers)) {
-            if (config.crconUrl && config.crconToken) {
-                const result = await this.testConnection(config.crconUrl, config.crconToken);
+            const provider = String(config.provider || 'crcon').toLowerCase();
+            const isConfigured = provider === 'rcon'
+                ? !!(config.rconHost && config.rconPassword)
+                : !!(config.crconUrl && config.crconToken);
+
+            if (isConfigured) {
+                const result = await this.testConnection(config);
                 results.push({
                     serverNum: num,
                     serverName: config.serverName,
@@ -353,13 +444,34 @@ class SetupWizard {
     // Save server from modal submission
     async saveServerFromModal(interaction) {
         const serverNum = interaction.customId.split('_').pop();
+        const provider = interaction.fields.getTextInputValue('connection_provider');
+        const endpoint = interaction.fields.getTextInputValue('connection_endpoint');
+        const secret = interaction.fields.getTextInputValue('connection_secret');
+        const parsed = this.parseProviderConfig(provider, endpoint, secret);
+
+        if (!parsed.valid) {
+            return { success: false, message: parsed.error };
+        }
 
         const config = {
             serverName: interaction.fields.getTextInputValue('server_name'),
-            crconUrl: interaction.fields.getTextInputValue('crcon_url').replace(/\/$/, ''),
-            crconToken: interaction.fields.getTextInputValue('crcon_token'),
-            channelId: interaction.fields.getTextInputValue('channel_id')
+            channelId: interaction.fields.getTextInputValue('channel_id'),
+            provider: parsed.provider
         };
+
+        if (parsed.provider === 'crcon') {
+            config.crconUrl = parsed.crconUrl;
+            config.crconToken = parsed.crconToken;
+            config.rconHost = null;
+            config.rconPort = null;
+            config.rconPassword = null;
+        } else {
+            config.rconHost = parsed.rconHost;
+            config.rconPort = parsed.rconPort;
+            config.rconPassword = parsed.rconPassword;
+            config.crconUrl = null;
+            config.crconToken = null;
+        }
 
         // Validate channel ID is numeric
         if (!/^\d+$/.test(config.channelId)) {
@@ -370,11 +482,14 @@ class SetupWizard {
         }
 
         // Test connection before saving
-        const testResult = await this.testConnection(config.crconUrl, config.crconToken);
+        const testResult = await this.testConnection(config);
         if (!testResult.success) {
+            const guidance = config.provider === 'rcon'
+                ? 'Please check your RCON host/port/password.'
+                : 'Please check your CRCON URL and token.';
             return {
                 success: false,
-                message: `Connection test failed: ${testResult.error}\n\nConfiguration NOT saved. Please check your CRCON URL and token.`
+                message: `Connection test failed: ${testResult.error}\n\nConfiguration NOT saved. ${guidance}`
             };
         }
 
@@ -383,7 +498,7 @@ class SetupWizard {
 
         return {
             success: true,
-            message: `Server ${serverNum} configured successfully!\n\n**Connected to:** ${testResult.serverName}\n**Players:** ${testResult.players}/${testResult.maxPlayers}\n\nClick **Apply & Restart** to activate the changes.`
+            message: `Server ${serverNum} configured successfully!\n\n**Provider:** ${String(config.provider).toUpperCase()}\n**Connected to:** ${testResult.serverName}\n**Players:** ${testResult.players}/${testResult.maxPlayers}\n\nClick **Apply & Restart** to activate the changes.`
         };
     }
 
