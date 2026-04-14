@@ -574,9 +574,19 @@ class SetupWizard {
 
         if ((transportMode === TRANSPORT_MODES.DIRECT_RCON || transportMode === TRANSPORT_MODES.API_WITH_FALLBACK)
             && (!config.rconHost || !config.rconPort || !config.rconPassword)) {
+            const saved = configManager.setServerConfig(serverNum, config);
+            if (!saved) {
+                return {
+                    success: false,
+                    message: 'Failed to save server configuration. Check file permissions and try again.'
+                };
+            }
             return {
-                success: false,
-                message: 'This transport mode requires RCON host, port, and password. Save the server in CRCON mode first or open **Edit RCON** to add direct RCON details.'
+                success: true,
+                message:
+                    `Server ${serverNum} saved in **${TRANSPORT_MODE_LABELS[transportMode] || transportMode}** mode, but direct RCON details are still required.\n\n` +
+                    'Next step: open **Edit RCON**, add host/port/password, then click **Apply & Restart**.\n\n' +
+                    'The bot will not start this server until those RCON details are saved.'
             };
         }
 
@@ -588,7 +598,13 @@ class SetupWizard {
             };
         }
 
-        configManager.setServerConfig(serverNum, config);
+        const saved = configManager.setServerConfig(serverNum, config);
+        if (!saved) {
+            return {
+                success: false,
+                message: 'Failed to save server configuration. Check file permissions and try again.'
+            };
+        }
 
         return {
             success: true,
@@ -662,7 +678,13 @@ class SetupWizard {
             }
         }
 
-        configManager.setServerConfig(serverNum, nextConfig);
+        const saved = configManager.setServerConfig(serverNum, nextConfig);
+        if (!saved) {
+            return {
+                success: false,
+                message: 'Failed to save RCON settings. Check file permissions and try again.'
+            };
+        }
         return {
             success: true,
             message: `Direct RCON settings saved for Server ${serverNum}. Click **Apply & Restart** to activate the changes.`

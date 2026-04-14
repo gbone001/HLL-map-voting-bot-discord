@@ -500,12 +500,15 @@ class ScheduleManager {
     formatScheduleDisplay(schedule, serverNum) {
         const config = this.getServerConfig(serverNum);
         const { time } = this.getCurrentTime(serverNum);
+        const normalizedDays = Array.isArray(schedule.days) ? [...schedule.days].sort() : null;
+        const weekdayPreset = [...DAY_PRESETS.weekdays].sort();
+        const weekendPreset = [...DAY_PRESETS.weekend].sort();
 
         let daysDisplay = 'All Days';
         if (schedule.days) {
-            if (JSON.stringify(schedule.days.sort()) === JSON.stringify(DAY_PRESETS.weekdays.sort())) {
+            if (JSON.stringify(normalizedDays) === JSON.stringify(weekdayPreset)) {
                 daysDisplay = 'Weekdays';
-            } else if (JSON.stringify(schedule.days.sort()) === JSON.stringify(DAY_PRESETS.weekend.sort())) {
+            } else if (JSON.stringify(normalizedDays) === JSON.stringify(weekendPreset)) {
                 daysDisplay = 'Weekend';
             } else if (schedule.days.length < 7) {
                 daysDisplay = schedule.days.map(d => d.charAt(0).toUpperCase() + d.slice(1)).join(', ');

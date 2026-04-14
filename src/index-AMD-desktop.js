@@ -111,7 +111,7 @@ async function initializeServers() {
 
         if (config.configured && config.channelId) {
             // Create CRCON service
-            const crcon = new CRCONService(config.crconUrl, config.crconToken, config.serverName);
+            const crcon = new CRCONService(config);
             crconServices[serverNum] = crcon;
 
             // Create map voting service
