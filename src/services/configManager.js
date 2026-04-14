@@ -83,13 +83,29 @@ class ConfigManager {
     }
 
     setServerConfig(serverNum, config) {
+        const previousServerConfig = this.config.servers[serverNum]
+            ? JSON.parse(JSON.stringify(this.config.servers[serverNum]))
+            : undefined;
+        const previousSetupComplete = this.config.setupComplete;
+
         this.config.servers[serverNum] = {
             ...this.config.servers[serverNum],
             ...config,
             updatedAt: new Date().toISOString()
         };
         this.config.setupComplete = true;
-        return this.saveConfig();
+
+        if (this.saveConfig()) {
+            return true;
+        }
+
+        if (previousServerConfig === undefined) {
+            delete this.config.servers[serverNum];
+        } else {
+            this.config.servers[serverNum] = previousServerConfig;
+        }
+        this.config.setupComplete = previousSetupComplete;
+        return false;
     }
 
     removeServerConfig(serverNum) {

@@ -418,12 +418,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
                             flags: MessageFlags.Ephemeral
                         });
                     }
-                    const modal = setupWizard.buildServerModal();
-                    await interaction.showModal(modal);
+                    await interaction.update(setupWizard.buildTransportModeSelectPanel('add', nextNum));
                 }
 
                 else if (customId === 'setup_edit_server') {
                     const panel = setupWizard.buildServerSelectMenu('edit');
+                    if (!panel) {
+                        return interaction.reply({ content: 'No servers configured.', flags: MessageFlags.Ephemeral });
+                    }
+                    await interaction.update(panel);
+                }
+
+                else if (customId === 'setup_edit_rcon') {
+                    const panel = setupWizard.buildServerSelectMenu('rcon');
                     if (!panel) {
                         return interaction.reply({ content: 'No servers configured.', flags: MessageFlags.Ephemeral });
                     }
@@ -1989,6 +1996,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 if (result.success) {
                     await interaction.editReply({ content: result.message });
                     // Update the setup panel
+                    const channel = interaction.channel;
+                    const messages = await channel.messages.fetch({ limit: 10 });
+                    const setupMessage = messages.find(m =>
+                        m.author.id === client.user.id &&
+                        m.embeds[0]?.title === 'Seeding Bot Setup'
+                    );
+                    if (setupMessage) {
+                        await setupMessage.edit(setupWizard.buildSetupPanel());
+                    }
+                } else {
+                    await interaction.editReply({ content: result.message });
+                }
+                return;
+            }
+
+            if (customId.startsWith('setup_modal_rcon_')) {
+                if (!isServerOwner(interaction.member)) {
+                    return interaction.reply({ content: 'Only server owners can modify setup.', flags: MessageFlags.Ephemeral });
+                }
+
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+                const result = await setupWizard.saveRconFromModal(interaction);
+
+                if (result.success) {
+                    await interaction.editReply({ content: result.message });
                     const channel = interaction.channel;
                     const messages = await channel.messages.fetch({ limit: 10 });
                     const setupMessage = messages.find(m =>

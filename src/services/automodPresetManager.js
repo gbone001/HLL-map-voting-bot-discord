@@ -97,7 +97,10 @@ class AutoModPresetManager {
         };
 
         server[safeType].push(preset);
-        this.saveData();
+        if (!this.saveData()) {
+            server[safeType].pop();
+            return { success: false, error: 'Failed to save preset data.' };
+        }
         return { success: true, preset };
     }
 
