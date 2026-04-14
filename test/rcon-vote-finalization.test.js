@@ -72,7 +72,7 @@ function buildVotingService(crcon) {
     return service;
 }
 
-test('vote finalization in direct RCON mode moves an existing winner to the next map slot', async () => {
+test('vote finalization in direct RCON mode moves an existing winner into the slot after currentIndex', async () => {
     const crcon = new CRCONService({
         serverName: 'Test Server',
         transportMode: TRANSPORT_MODES.DIRECT_RCON,
@@ -89,10 +89,14 @@ test('vote finalization in direct RCON mode moves an existing winner to the next
         if (command === 'GetServerInformation') {
             return {
                 result: {
+                    currentIndex: 10,
                     MapSequence: [
-                        { MapName: 'Foy', MapId: 'foy_warfare' },
-                        { MapName: 'St. Mere Eglise', MapId: 'stmereeglise_warfare' },
-                        { MapName: 'Utah Beach', MapId: 'utahbeach_warfare' }
+                        { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 0 },
+                        { MapName: 'Foy', MapId: 'foy_warfare', position: 9 },
+                        { MapName: 'Omaha Beach', MapId: 'omahabeach_warfare', position: 10 },
+                        { MapName: 'Kharkov', MapId: 'kharkov_warfare', position: 11 },
+                        { MapName: 'St. Mere Eglise', MapId: 'stmereeglise_warfare', position: 15 },
+                        { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 22 }
                     ]
                 }
             };
@@ -114,13 +118,13 @@ test('vote finalization in direct RCON mode moves an existing winner to the next
         },
         {
             command: 'MoveMapInSequence',
-            payload: { CurrentIndex: 1, NewIndex: 0 },
+            payload: { CurrentIndex: 15, NewIndex: 11 },
             endpoint: 'set_map_rotation'
         }
     ]);
 });
 
-test('vote finalization in direct RCON mode adds a missing winner to the next map slot', async () => {
+test('vote finalization in direct RCON mode adds a missing winner into the slot after currentIndex', async () => {
     const crcon = new CRCONService({
         serverName: 'Test Server',
         transportMode: TRANSPORT_MODES.DIRECT_RCON,
@@ -137,9 +141,12 @@ test('vote finalization in direct RCON mode adds a missing winner to the next ma
         if (command === 'GetServerInformation') {
             return {
                 result: {
+                    currentIndex: 10,
                     MapSequence: [
-                        { MapName: 'Foy', MapId: 'foy_warfare' },
-                        { MapName: 'Utah Beach', MapId: 'utahbeach_warfare' }
+                        { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 0 },
+                        { MapName: 'Foy', MapId: 'foy_warfare', position: 9 },
+                        { MapName: 'Omaha Beach', MapId: 'omahabeach_warfare', position: 10 },
+                        { MapName: 'Kharkov', MapId: 'kharkov_warfare', position: 11 }
                     ]
                 }
             };
@@ -165,7 +172,7 @@ test('vote finalization in direct RCON mode adds a missing winner to the next ma
         },
         {
             command: 'AddMapToSequence',
-            payload: { MapName: 'stmariedumont_warfare', Index: 0 },
+            payload: { MapName: 'stmariedumont_warfare', Index: 11 },
             endpoint: 'set_map_rotation'
         }
     ]);
@@ -198,9 +205,12 @@ test('vote finalization in fallback mode sends the voted winner through direct R
         if (command === 'GetServerInformation') {
             return {
                 result: {
+                    currentIndex: 10,
                     MapSequence: [
-                        { MapName: 'Foy', MapId: 'foy_warfare' },
-                        { MapName: 'Utah Beach', MapId: 'utahbeach_warfare' }
+                        { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 0 },
+                        { MapName: 'Foy', MapId: 'foy_warfare', position: 9 },
+                        { MapName: 'Omaha Beach', MapId: 'omahabeach_warfare', position: 10 },
+                        { MapName: 'Kharkov', MapId: 'kharkov_warfare', position: 11 }
                     ]
                 }
             };
@@ -222,7 +232,54 @@ test('vote finalization in fallback mode sends the voted winner through direct R
         },
         {
             command: 'AddMapToSequence',
-            payload: { MapName: 'stmereeglise_warfare', Index: 0 },
+            payload: { MapName: 'stmereeglise_warfare', Index: 11 },
+            endpoint: 'set_map_rotation'
+        }
+    ]);
+});
+
+test('direct RCON next-map selection uses currentIndex instead of sequence position zero', async () => {
+    const crcon = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.DIRECT_RCON,
+        rconHost: '127.0.0.1',
+        rconPort: 27015,
+        rconPassword: 'secret'
+    });
+
+    const commands = [];
+    crcon.hasDirectRconConfigured = () => true;
+    crcon.executeDirectCommand = async (command, payload, endpoint) => {
+        commands.push({ command, payload, endpoint });
+
+        if (command === 'GetServerInformation') {
+            return {
+                result: {
+                    currentIndex: 10,
+                    mAPS: [
+                        { name: 'UTAH BEACH', iD: '/Game/Maps/utahbeach_warfare', position: 0 },
+                        { name: 'KURSK', iD: '/Game/Maps/kursk_warfare_night', position: 9 },
+                        { name: 'OMAHA BEACH', iD: '/Game/Maps/omahabeach_warfare', position: 10 },
+                        { name: 'KHARKOV', iD: '/Game/Maps/kharkov_warfare', position: 11 }
+                    ]
+                }
+            };
+        }
+
+        return { result: { ok: true } };
+    };
+
+    await crcon.post('set_map_rotation', { map_names: ['stmereeglise_warfare'] });
+
+    assert.deepEqual(commands, [
+        {
+            command: 'GetServerInformation',
+            payload: { Name: 'mapsequence', Value: '' },
+            endpoint: 'get_map_rotation'
+        },
+        {
+            command: 'AddMapToSequence',
+            payload: { MapName: 'stmereeglise_warfare', Index: 11 },
             endpoint: 'set_map_rotation'
         }
     ]);

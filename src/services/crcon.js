@@ -470,12 +470,34 @@ class CRCONService {
             { Name: 'mapsequence', Value: '' },
             'get_map_rotation'
         );
-        const sequence = this.normalizeMapCollection(sequenceResponse.result);
-        const existingIndex = sequence.findIndex((entry) => entry.id === mapId);
+        const sequenceState = this.normalizeDirectSequenceState(sequenceResponse.result);
+        const sequence = sequenceState.entries;
 
-        // Assumption: sequence index 0 is the next map slot, which is the closest
-        // direct-RCON equivalent to CRCON's set_map_rotation([mapId]).
-        if (existingIndex === 0) {
+        if (sequence.length === 0) {
+            await this.executeDirectCommand(
+                'AddMapToSequence',
+                { MapName: mapId, Index: 0 },
+                'set_map_rotation'
+            );
+            return {
+                result: {
+                    map_names: [mapId],
+                    method: 'sequence-add-empty'
+                }
+            };
+        }
+
+        const currentIndex = Number.isInteger(sequenceState.currentIndex)
+            ? sequenceState.currentIndex
+            : 0;
+        const maxPosition = sequence.reduce(
+            (highestPosition, entry) => Math.max(highestPosition, entry.sequencePosition),
+            0
+        );
+        const nextIndex = currentIndex >= maxPosition ? 0 : currentIndex + 1;
+        const existingIndex = this.findPreferredSequenceIndex(sequence, mapId, currentIndex);
+
+        if (existingIndex === nextIndex) {
             return {
                 result: {
                     map_names: [mapId],
@@ -484,16 +506,16 @@ class CRCONService {
             };
         }
 
-        if (existingIndex > 0) {
+        if (existingIndex >= 0) {
             await this.executeDirectCommand(
                 'MoveMapInSequence',
-                { CurrentIndex: existingIndex, NewIndex: 0 },
+                { CurrentIndex: existingIndex, NewIndex: nextIndex },
                 'set_map_rotation'
             );
         } else {
             await this.executeDirectCommand(
                 'AddMapToSequence',
-                { MapName: mapId, Index: 0 },
+                { MapName: mapId, Index: nextIndex },
                 'set_map_rotation'
             );
         }
@@ -501,7 +523,9 @@ class CRCONService {
         return {
             result: {
                 map_names: [mapId],
-                method: 'sequence-index-0'
+                method: 'sequence-next-index',
+                current_index: currentIndex,
+                next_index: nextIndex
             }
         };
     }
@@ -595,6 +619,75 @@ class CRCONService {
                 entry?.MapName || entry?.name || entry?.Name || String(entry)
             );
         });
+    }
+
+    normalizeDirectSequenceState(rawValue) {
+        const items = Array.isArray(rawValue)
+            ? rawValue
+            : Array.isArray(rawValue?.Entries)
+                ? rawValue.Entries
+                : Array.isArray(rawValue?.entries)
+                    ? rawValue.entries
+                    : Array.isArray(rawValue?.mAPS)
+                        ? rawValue.mAPS
+                        : Array.isArray(rawValue?.MapSequence)
+                            ? rawValue.MapSequence
+                            : Array.isArray(rawValue?.MapRotation)
+                                ? rawValue.MapRotation
+                                : typeof rawValue === 'string'
+                                    ? rawValue.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+                                    : [];
+
+        const entries = items.map((entry, arrayIndex) => {
+            const mapId = this.resolveMapIdFromValues([
+                entry?.MapName,
+                entry?.MapId,
+                entry?.iD,
+                entry?.map_name,
+                entry?.map_id,
+                entry?.Name,
+                entry?.name,
+                entry
+            ]);
+            const normalizedMap = this.findMapById(mapId) || buildMapStub(
+                mapId,
+                entry?.MapName || entry?.name || entry?.Name || String(entry)
+            );
+            const parsedPosition = Number.parseInt(entry?.position, 10);
+
+            return {
+                ...normalizedMap,
+                sequencePosition: Number.isNaN(parsedPosition) ? arrayIndex : parsedPosition
+            };
+        });
+
+        entries.sort((left, right) => left.sequencePosition - right.sequencePosition);
+
+        const rawCurrentIndex = rawValue?.currentIndex ?? rawValue?.CurrentIndex;
+        const parsedCurrentIndex = Number.parseInt(rawCurrentIndex, 10);
+        const fallbackCurrentIndex = entries.find((entry) => entry.sequencePosition === 0)?.sequencePosition ?? 0;
+
+        return {
+            currentIndex: Number.isNaN(parsedCurrentIndex) ? fallbackCurrentIndex : parsedCurrentIndex,
+            entries
+        };
+    }
+
+    findPreferredSequenceIndex(sequence, mapId, currentIndex) {
+        const matchingIndexes = sequence
+            .filter((entry) => entry.id === mapId)
+            .map((entry) => entry.sequencePosition);
+
+        if (matchingIndexes.length === 0) {
+            return -1;
+        }
+
+        const upcomingIndex = matchingIndexes.find((index) => index > currentIndex);
+        if (upcomingIndex !== undefined) {
+            return upcomingIndex;
+        }
+
+        return matchingIndexes[0];
     }
 
     updateLocalMatchStateFromStatus(statusPayload) {
