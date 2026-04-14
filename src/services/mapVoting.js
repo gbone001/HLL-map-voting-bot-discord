@@ -13,7 +13,9 @@ const configManager = require('./configManager');
 
 class MapVotingService {
     constructor(serverNum = 1) {
+        MapVotingService.instanceCounter = (MapVotingService.instanceCounter || 0) + 1;
         this.serverNum = serverNum;
+        this.instanceId = MapVotingService.instanceCounter;
         this.client = null;
         this.channel = null;
         this.channelId = null;
@@ -93,6 +95,7 @@ class MapVotingService {
         this.lastServerStatus = null;
         this.lastObservedMatchMapId = null;
         this.pendingMatchStartDetection = false;
+        this.voteFinalizationInProgress = false;
     }
 
     // ==================== INITIALIZATION ====================
@@ -1117,8 +1120,11 @@ class MapVotingService {
             } else {
                 logger.warn(`[MapVoting S${this.serverNum}] Could not determine next map`);
             }
+
+            return mapId;
         } catch (error) {
             logger.error(`[MapVoting S${this.serverNum}] Error setting vote result:`, error.message);
+            throw error;
         }
     }
 
@@ -1174,22 +1180,66 @@ class MapVotingService {
     }
 
     async stopVote() {
+        if (this.voteFinalizationInProgress) {
+            logger.warn(`[MapVoting S${this.serverNum}] Vote finalization already in progress; skipping duplicate stopVote`);
+            return;
+        }
+
+        this.voteFinalizationInProgress = true;
+        const voteMessageId = this.voteMessageId;
+        const gameStart = this.gameStart;
+        const finalizationOwnerId = `${process.pid}:${this.serverNum}:${this.instanceId}:${voteMessageId || 'no-message'}`;
+        let finalizationClaimed = false;
+
         try {
+            if (gameStart && voteMessageId) {
+                const claimResult = voteStore.claimVoteFinalization(
+                    gameStart,
+                    this.serverNum,
+                    voteMessageId,
+                    finalizationOwnerId
+                );
+
+                if (!claimResult.claimed) {
+                    logger.warn(
+                        `[MapVoting S${this.serverNum}] Skipping duplicate vote finalization for message ${voteMessageId}: ${claimResult.reason || 'unknown'}`
+                    );
+                    this.voteActive = false;
+                    return;
+                }
+
+                finalizationClaimed = true;
+            }
+
             if (this.voteMessage && this.voteMessage.poll) {
                 await this.voteMessage.poll.end();
             }
-            await this.setVoteResult();
+            const finalizedMapId = await this.setVoteResult();
+
+            if (finalizationClaimed) {
+                voteStore.completeVoteFinalization(
+                    gameStart,
+                    this.serverNum,
+                    finalizationOwnerId,
+                    finalizedMapId
+                );
+            }
 
             // Clean up vote from store
-            if (this.gameStart) {
-                voteStore.deleteVote(this.gameStart, this.serverNum);
+            if (gameStart) {
+                voteStore.deleteVote(gameStart, this.serverNum);
             }
 
             this.voteActive = false;
             logger.info(`[MapVoting S${this.serverNum}] Vote stopped`);
         } catch (error) {
             logger.error(`[MapVoting S${this.serverNum}] Error stopping vote:`, error.message);
+            if (finalizationClaimed && gameStart) {
+                voteStore.releaseVoteFinalization(gameStart, this.serverNum, finalizationOwnerId);
+            }
             this.voteActive = false;
+        } finally {
+            this.voteFinalizationInProgress = false;
         }
     }
 

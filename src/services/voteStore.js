@@ -15,6 +15,11 @@ class VoteStore {
         this.votes = this.load();
     }
 
+    reload() {
+        this.votes = this.load();
+        return this.votes;
+    }
+
     load() {
         try {
             const dataDir = path.dirname(STORE_PATH);
@@ -53,6 +58,7 @@ class VoteStore {
      * @returns {object|null} Vote data or null
      */
     getVote(gameStart, serverNum) {
+        this.reload();
         const key = `${serverNum}_${gameStart}`;
         return this.votes[key] || null;
     }
@@ -65,16 +71,113 @@ class VoteStore {
      * @param {Array} maps - Maps in the vote
      */
     setVote(messageId, gameStart, serverNum, maps = []) {
+        this.reload();
         const key = `${serverNum}_${gameStart}`;
         this.votes[key] = {
             messageId,
             gameStart,
             serverNum,
             maps,
+            finalizationClaim: null,
+            finalizedAt: null,
+            finalizedMapId: null,
             createdAt: Date.now()
         };
         this.save();
         logger.info(`[VoteStore] Stored vote for server ${serverNum}, gameStart ${gameStart}`);
+    }
+
+    /**
+     * Claim vote finalization so only one bot instance applies the result.
+     * @param {number} gameStart
+     * @param {number} serverNum
+     * @param {string} messageId
+     * @param {string} ownerId
+     * @param {number} ttlMs
+     * @returns {{ claimed: boolean, reason?: string, vote?: object }}
+     */
+    claimVoteFinalization(gameStart, serverNum, messageId, ownerId, ttlMs = 120000) {
+        this.reload();
+        const key = `${serverNum}_${gameStart}`;
+        const vote = this.votes[key];
+
+        if (!vote) {
+            return { claimed: false, reason: 'missing' };
+        }
+
+        if (messageId && vote.messageId && String(vote.messageId) !== String(messageId)) {
+            return { claimed: false, reason: 'message_mismatch', vote };
+        }
+
+        if (vote.finalizedAt) {
+            return { claimed: false, reason: 'already_finalized', vote };
+        }
+
+        const existingClaim = vote.finalizationClaim;
+        const now = Date.now();
+        if (existingClaim && existingClaim.ownerId !== ownerId && existingClaim.expiresAt > now) {
+            return { claimed: false, reason: 'claimed_by_other', vote };
+        }
+
+        vote.finalizationClaim = {
+            ownerId,
+            claimedAt: now,
+            expiresAt: now + ttlMs
+        };
+
+        this.save();
+        logger.info(`[VoteStore] Finalization claimed for server ${serverNum}, gameStart ${gameStart}, owner ${ownerId}`);
+        return { claimed: true, vote };
+    }
+
+    /**
+     * Mark finalization as complete for observability before cleanup.
+     * @param {number} gameStart
+     * @param {number} serverNum
+     * @param {string} ownerId
+     * @param {string|null} finalizedMapId
+     * @returns {boolean}
+     */
+    completeVoteFinalization(gameStart, serverNum, ownerId, finalizedMapId = null) {
+        this.reload();
+        const key = `${serverNum}_${gameStart}`;
+        const vote = this.votes[key];
+
+        if (!vote) {
+            return false;
+        }
+
+        if (vote.finalizationClaim?.ownerId !== ownerId) {
+            return false;
+        }
+
+        vote.finalizedAt = Date.now();
+        vote.finalizedMapId = finalizedMapId || null;
+        vote.finalizationClaim = null;
+        this.save();
+        return true;
+    }
+
+    /**
+     * Release a finalization claim after a failed attempt so a later retry can proceed.
+     * @param {number} gameStart
+     * @param {number} serverNum
+     * @param {string} ownerId
+     * @returns {boolean}
+     */
+    releaseVoteFinalization(gameStart, serverNum, ownerId) {
+        this.reload();
+        const key = `${serverNum}_${gameStart}`;
+        const vote = this.votes[key];
+
+        if (!vote || vote.finalizationClaim?.ownerId !== ownerId) {
+            return false;
+        }
+
+        vote.finalizationClaim = null;
+        this.save();
+        logger.warn(`[VoteStore] Released finalization claim for server ${serverNum}, gameStart ${gameStart}, owner ${ownerId}`);
+        return true;
     }
 
     /**
@@ -83,6 +186,7 @@ class VoteStore {
      * @param {number} serverNum - Server number
      */
     deleteVote(gameStart, serverNum) {
+        this.reload();
         const key = `${serverNum}_${gameStart}`;
         if (this.votes[key]) {
             delete this.votes[key];
@@ -95,6 +199,7 @@ class VoteStore {
      * Clean up old votes (older than 24 hours)
      */
     cleanup() {
+        this.reload();
         const cutoff = Date.now() - (24 * 60 * 60 * 1000);
         let cleaned = 0;
 
@@ -117,6 +222,7 @@ class VoteStore {
      * @returns {*} Value or null
      */
     getState(key) {
+        this.reload();
         return this.votes[`_state_${key}`] ?? null;
     }
 
@@ -126,6 +232,7 @@ class VoteStore {
      * @param {*} value
      */
     setState(key, value) {
+        this.reload();
         this.votes[`_state_${key}`] = value;
         this.save();
     }

@@ -1,6 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { MapVotingService } = require('../src/services/mapVoting');
+const voteStore = require('../src/services/voteStore');
 
 test('non-seeded rotation still applies on match end when voting is disabled', async () => {
     const service = new MapVotingService(1);
@@ -183,4 +184,65 @@ test('match snapshot fallback detects a map change as a match boundary', async (
     assert.equal(firstTick, true);
     assert.equal(boundaryTick, false);
     assert.equal(resumedTick, true);
+});
+
+test('duplicate vote finalization claims do not overwrite the first selected map', async () => {
+    const gameStart = Date.now() + Math.floor(Math.random() * 100000);
+    const serverNum = 1;
+    const messageId = `vote-${gameStart}`;
+    let releaseFirstFinalizer;
+    let firstSetVoteResultCalls = 0;
+    let secondSetVoteResultCalls = 0;
+
+    voteStore.deleteVote(gameStart, serverNum);
+    voteStore.setVote(messageId, gameStart, serverNum, [
+        { id: 'foy_warfare', pretty_name: 'Foy Warfare' }
+    ]);
+
+    const firstService = new MapVotingService(serverNum);
+    firstService.gameStart = gameStart;
+    firstService.voteMessageId = messageId;
+    firstService.voteActive = true;
+    firstService.voteMessage = {
+        poll: {
+            end: async () => {}
+        }
+    };
+    firstService.setVoteResult = async () => {
+        firstSetVoteResultCalls += 1;
+        await new Promise((resolve) => {
+            releaseFirstFinalizer = resolve;
+        });
+        return 'foy_warfare';
+    };
+
+    const secondService = new MapVotingService(serverNum);
+    secondService.gameStart = gameStart;
+    secondService.voteMessageId = messageId;
+    secondService.voteActive = true;
+    secondService.voteMessage = {
+        poll: {
+            end: async () => {}
+        }
+    };
+    secondService.setVoteResult = async () => {
+        secondSetVoteResultCalls += 1;
+        return 'kursk_warfare';
+    };
+
+    try {
+        const firstStopPromise = firstService.stopVote();
+        await new Promise((resolve) => setImmediate(resolve));
+        await secondService.stopVote();
+
+        assert.equal(firstSetVoteResultCalls, 1);
+        assert.equal(secondSetVoteResultCalls, 0);
+
+        releaseFirstFinalizer();
+        await firstStopPromise;
+
+        assert.equal(voteStore.getVote(gameStart, serverNum), null);
+    } finally {
+        voteStore.deleteVote(gameStart, serverNum);
+    }
 });
