@@ -52,6 +52,100 @@ test('CRCON service falls back to direct RCON for get_status when API fails', as
     assert.equal(response.result.map.id, 'foy_warfare');
 });
 
+test('fallback mode opens a CRCON circuit after repeated API failures and bypasses further supported calls', async () => {
+    const service = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_WITH_FALLBACK,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token',
+        rconHost: '127.0.0.1',
+        rconPort: 27015,
+        rconPassword: 'secret',
+        crconCircuitThreshold: 2,
+        crconCircuitCooldownMs: 60_000
+    });
+
+    let apiCalls = 0;
+    let directCalls = 0;
+
+    service.client = {
+        get: async () => {
+            apiCalls += 1;
+            throw createApiFailure();
+        }
+    };
+    service.executeDirectEndpoint = async () => {
+        directCalls += 1;
+        return { result: { current_players: 48 } };
+    };
+
+    await service.getStatus();
+    await service.getStatus();
+    await service.getStatus();
+
+    assert.equal(apiCalls, 2);
+    assert.equal(directCalls, 3);
+    assert.equal(service.isCrconCircuitOpen(), true);
+});
+
+test('fallback mode probes CRCON again after cooldown and closes the circuit on success', async () => {
+    const originalNow = Date.now;
+    let fakeNow = 1_000_000;
+    Date.now = () => fakeNow;
+
+    try {
+        const service = new CRCONService({
+            serverName: 'Test Server',
+            transportMode: TRANSPORT_MODES.API_WITH_FALLBACK,
+            crconUrl: 'http://example.invalid',
+            crconToken: 'token',
+            rconHost: '127.0.0.1',
+            rconPort: 27015,
+            rconPassword: 'secret',
+            crconCircuitThreshold: 2,
+            crconCircuitCooldownMs: 10
+        });
+
+        let apiCalls = 0;
+        service.client = {
+            get: async () => {
+                apiCalls += 1;
+                if (apiCalls <= 2) {
+                    throw createApiFailure();
+                }
+                return {
+                    data: {
+                        result: {
+                            current_players: 77,
+                            map: { id: 'foy_warfare', pretty_name: 'Foy Warfare' }
+                        }
+                    }
+                };
+            }
+        };
+        service.executeDirectEndpoint = async () => ({
+            result: {
+                current_players: 48,
+                map: { id: 'foy_warfare', pretty_name: 'Foy Warfare' }
+            }
+        });
+
+        await service.getStatus();
+        await service.getStatus();
+        assert.equal(service.isCrconCircuitOpen(), true);
+
+        fakeNow += 11;
+        const response = await service.getStatus();
+
+        assert.equal(apiCalls, 3);
+        assert.equal(response.result.current_players, 77);
+        assert.equal(service.isCrconCircuitOpen(), false);
+        assert.equal(service.crconFailureCount, 0);
+    } finally {
+        Date.now = originalNow;
+    }
+});
+
 test('direct transport map catalog is warfare-only', async () => {
     const service = new CRCONService({
         serverName: 'Test Server',

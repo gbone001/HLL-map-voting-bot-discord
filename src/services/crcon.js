@@ -18,6 +18,9 @@ const TRANSPORT_MODES = {
     API_WITH_FALLBACK: 'crcon-api-with-rcon-fallback'
 };
 
+const DEFAULT_CRCON_CIRCUIT_THRESHOLD = 3;
+const DEFAULT_CRCON_CIRCUIT_COOLDOWN_MS = 60 * 1000;
+
 class CRCONService {
     constructor(configOrBaseUrl, apiToken, serverName = 'Server') {
         const config = typeof configOrBaseUrl === 'object' && configOrBaseUrl !== null
@@ -48,6 +51,14 @@ class CRCONService {
         this.localMapHistory = [];
         this.currentMatchMapId = null;
         this.matchStartEpochMs = null;
+        this.crconFailureCount = 0;
+        this.crconCircuitOpenUntil = 0;
+        this.crconCircuitThreshold = Number.isFinite(config.crconCircuitThreshold)
+            ? config.crconCircuitThreshold
+            : DEFAULT_CRCON_CIRCUIT_THRESHOLD;
+        this.crconCircuitCooldownMs = Number.isFinite(config.crconCircuitCooldownMs)
+            ? config.crconCircuitCooldownMs
+            : DEFAULT_CRCON_CIRCUIT_COOLDOWN_MS;
 
         if (this.hasApiConfigured()) {
             this.client = axios.create({
@@ -222,11 +233,20 @@ class CRCONService {
         }
 
         if (this.transportMode === TRANSPORT_MODES.API_WITH_FALLBACK) {
+            const canUseDirect = this.hasDirectRconConfigured() && this.supportsCapability(endpoint);
             if (this.hasApiConfigured()) {
+                if (canUseDirect && this.isCrconCircuitOpen()) {
+                    return directExecutor();
+                }
+
                 try {
-                    return await apiExecutor();
+                    const result = await apiExecutor();
+                    this.recordApiSuccess();
+                    return result;
                 } catch (error) {
-                    if (!this.hasDirectRconConfigured() || !this.supportsCapability(endpoint)) {
+                    this.recordApiFailure(error);
+
+                    if (!canUseDirect) {
                         throw error;
                     }
 
@@ -241,6 +261,49 @@ class CRCONService {
         }
 
         throw new Error(`Unknown transport mode: ${this.transportMode}`);
+    }
+
+    isCrconCircuitOpen() {
+        return this.crconCircuitOpenUntil > Date.now();
+    }
+
+    recordApiSuccess() {
+        if (this.crconFailureCount > 0 || this.crconCircuitOpenUntil > 0) {
+            logger.info(`[CRCON ${this.serverName}] CRCON API recovered; closing fallback circuit`);
+        }
+
+        this.crconFailureCount = 0;
+        this.crconCircuitOpenUntil = 0;
+    }
+
+    recordApiFailure(error) {
+        if (!this.shouldTripCrconCircuit(error)) {
+            return;
+        }
+
+        this.crconFailureCount += 1;
+        if (this.crconFailureCount < this.crconCircuitThreshold) {
+            return;
+        }
+
+        const nextOpenUntil = Date.now() + this.crconCircuitCooldownMs;
+        if (nextOpenUntil <= this.crconCircuitOpenUntil) {
+            return;
+        }
+
+        this.crconCircuitOpenUntil = nextOpenUntil;
+        logger.warn(
+            `[CRCON ${this.serverName}] CRCON API unhealthy; bypassing API for ${Math.round(this.crconCircuitCooldownMs / 1000)}s`
+        );
+    }
+
+    shouldTripCrconCircuit(error) {
+        const status = error?.response?.status;
+        if (typeof status === 'number' && status >= 500) {
+            return true;
+        }
+
+        return Boolean(error?.request && !error?.response);
     }
 
     async executeDirectEndpoint(method, endpoint, data = {}) {
