@@ -1,23 +1,59 @@
 /**
  * CRCON Service
- * Handles communication with Hell Let Loose CRCON API
+ *
+ * Acts as a transport facade over:
+ * - the CRCON HTTP API
+ * - direct Hell Let Loose RCON
+ * - CRCON API with direct RCON fallback for supported commands
  */
 
 const axios = require('axios');
 const logger = require('../utils/logger');
+const { HLLRconClient } = require('./hllRconClient');
+const { WARFARE_MAP_CATALOG } = require('./hllMapCatalog');
+
+const TRANSPORT_MODES = {
+    API_ONLY: 'crcon-api',
+    DIRECT_RCON: 'direct-rcon',
+    API_WITH_FALLBACK: 'crcon-api-with-rcon-fallback'
+};
 
 class CRCONService {
-    constructor(baseUrl, apiToken, serverName = 'Server') {
-        this.baseUrl = baseUrl?.replace(/\/$/, ''); // Remove trailing slash
-        this.apiToken = apiToken;
-        this.serverName = serverName;
-        this.client = null;
+    constructor(configOrBaseUrl, apiToken, serverName = 'Server') {
+        const config = typeof configOrBaseUrl === 'object' && configOrBaseUrl !== null
+            ? { ...configOrBaseUrl }
+            : {
+                crconUrl: configOrBaseUrl,
+                crconToken: apiToken,
+                serverName
+            };
 
-        if (this.baseUrl && this.apiToken) {
+        this.serverName = config.serverName || serverName;
+        this.baseUrl = config.crconUrl?.replace(/\/$/, '');
+        this.apiToken = config.crconToken;
+        this.transportMode = normalizeTransportMode(config.transportMode);
+        this.rconHost = config.rconHost || null;
+        this.rconPort = config.rconPort || null;
+        this.rconPassword = config.rconPassword || null;
+
+        this.client = null;
+        this.directClient = new HLLRconClient({
+            host: this.rconHost,
+            port: this.rconPort,
+            password: this.rconPassword
+        });
+
+        this.localMapCatalog = WARFARE_MAP_CATALOG.map((map) => ({ ...map, map: { ...map.map } }));
+        this.mapLookup = this.buildMapLookup(this.localMapCatalog);
+        this.localMapHistory = [];
+        this.currentMatchMapId = null;
+        this.matchStartEpochMs = null;
+
+        if (this.hasApiConfigured()) {
             this.client = axios.create({
                 baseURL: this.baseUrl,
                 headers: {
-                    'Authorization': `Bearer ${this.apiToken}`,
+                    Authorization: `Bearer ${this.apiToken}`,
                     'Content-Type': 'application/json'
                 },
                 timeout: 30000
@@ -26,7 +62,75 @@ class CRCONService {
     }
 
     isConfigured() {
-        return !!(this.baseUrl && this.apiToken);
+        if (this.transportMode === TRANSPORT_MODES.DIRECT_RCON) {
+            return this.hasDirectRconConfigured();
+        }
+
+        if (this.transportMode === TRANSPORT_MODES.API_WITH_FALLBACK) {
+            return this.hasApiConfigured() || this.hasDirectRconConfigured();
+        }
+
+        return this.hasApiConfigured();
+    }
+
+    hasApiConfigured() {
+        return Boolean(this.baseUrl && this.apiToken);
+    }
+
+    hasDirectRconConfigured() {
+        return this.directClient.isConfigured();
+    }
+
+    isDirectFallbackEnabled() {
+        return this.transportMode === TRANSPORT_MODES.DIRECT_RCON ||
+            this.transportMode === TRANSPORT_MODES.API_WITH_FALLBACK;
+    }
+
+    supportsCapability(capability) {
+        const supportMatrix = {
+            get_status: true,
+            get_maps: true,
+            get_map: true,
+            get_map_rotation: true,
+            set_map: true,
+            set_map_rotation: true,
+            add_map_to_rotation: true,
+            remove_map_from_rotation: true,
+            set_broadcast: true,
+            set_team_switch_cooldown: true,
+            set_idle_autokick_time: true,
+            set_max_ping_autokick: true,
+            get_map_history: true,
+            match_tracking: true,
+            get_team_switch_cooldown: false,
+            get_idle_autokick_time: false,
+            get_max_ping_autokick: false,
+            get_votemap_config: false,
+            get_votemap_whitelist: false,
+            set_votemap_whitelist: false,
+            add_map_to_votemap_whitelist: false,
+            remove_map_from_votemap_whitelist: false,
+            reset_map_votemap_whitelist: false,
+            reset_votemap_state: false,
+            get_votemap_status: false,
+            set_votemap_config: false,
+            describe_auto_mod_solo_tank_config: false,
+            get_auto_mod_solo_tank_config: false,
+            validate_auto_mod_solo_tank_config: false,
+            set_auto_mod_solo_tank_config: false,
+            describe_auto_mod_no_leader_config: false,
+            get_auto_mod_no_leader_config: false,
+            validate_auto_mod_no_leader_config: false,
+            set_auto_mod_no_leader_config: false,
+            describe_auto_mod_level_config: false,
+            get_auto_mod_level_config: false,
+            validate_auto_mod_level_config: false,
+            set_auto_mod_level_config: false,
+            get_recent_logs: false,
+            get_public_info: false
+        };
+
+        return supportMatrix[capability] === true;
     }
 
     formatRequestError(error) {
@@ -71,35 +175,422 @@ class CRCONService {
     }
 
     async get(endpoint) {
-        if (!this.client) {
-            throw new Error('CRCON not configured');
-        }
-
-        try {
-            logger.debug(`CRCON GET: ${endpoint}`);
-            const response = await this.client.get(`/api/${endpoint}`);
-            return response.data;
-        } catch (error) {
-            const isStatusEndpointFailure = endpoint === 'get_status' && (error.response?.status || 0) >= 500;
-            const logMethod = isStatusEndpointFailure ? logger.warn.bind(logger) : logger.error.bind(logger);
-            logMethod(`[CRCON ${this.serverName}] GET ${endpoint} failed: ${this.formatRequestError(error)}`);
-            throw error;
-        }
+        return this.executeEndpoint('get', endpoint);
     }
 
     async post(endpoint, data = {}) {
-        if (!this.client) {
-            throw new Error('CRCON not configured');
+        return this.executeEndpoint('post', endpoint, data);
+    }
+
+    async executeEndpoint(method, endpoint, data = {}) {
+        const apiExecutor = async () => {
+            if (!this.client) {
+                throw new Error('CRCON not configured');
+            }
+
+            try {
+                logger.debug(`CRCON ${method.toUpperCase()}: ${endpoint}`);
+                const response = method === 'get'
+                    ? await this.client.get(`/api/${endpoint}`)
+                    : await this.client.post(`/api/${endpoint}`, data);
+
+                if (endpoint === 'get_status') {
+                    this.updateLocalMatchStateFromStatus(response.data);
+                }
+                return response.data;
+            } catch (error) {
+                const isStatusEndpointFailure = endpoint === 'get_status' && (error.response?.status || 0) >= 500;
+                const logMethod = isStatusEndpointFailure ? logger.warn.bind(logger) : logger.error.bind(logger);
+                logMethod(
+                    `[CRCON ${this.serverName}] ${method.toUpperCase()} ${endpoint} failed: ${this.formatRequestError(error)}`
+                );
+                throw error;
+            }
+        };
+
+        const directExecutor = () => this.executeDirectEndpoint(method, endpoint, data);
+        return this.executeWithTransport(method, endpoint, apiExecutor, directExecutor);
+    }
+
+    async executeWithTransport(method, endpoint, apiExecutor, directExecutor) {
+        if (this.transportMode === TRANSPORT_MODES.DIRECT_RCON) {
+            return directExecutor();
+        }
+
+        if (this.transportMode === TRANSPORT_MODES.API_ONLY) {
+            return apiExecutor();
+        }
+
+        if (this.transportMode === TRANSPORT_MODES.API_WITH_FALLBACK) {
+            if (this.hasApiConfigured()) {
+                try {
+                    return await apiExecutor();
+                } catch (error) {
+                    if (!this.hasDirectRconConfigured() || !this.supportsCapability(endpoint)) {
+                        throw error;
+                    }
+
+                    logger.warn(
+                        `[CRCON ${this.serverName}] Falling back to direct RCON for ${method.toUpperCase()} ${endpoint}`
+                    );
+                    return directExecutor();
+                }
+            }
+
+            return directExecutor();
+        }
+
+        throw new Error(`Unknown transport mode: ${this.transportMode}`);
+    }
+
+    async executeDirectEndpoint(method, endpoint, data = {}) {
+        if (!this.hasDirectRconConfigured()) {
+            throw new Error(`Direct RCON is not configured for ${this.serverName}`);
+        }
+
+        if (!this.supportsCapability(endpoint)) {
+            throw createUnsupportedTransportError(
+                endpoint,
+                `Direct RCON does not support ${endpoint} for ${this.serverName}`
+            );
+        }
+
+        switch (`${method}:${endpoint}`) {
+            case 'get:get_status':
+                return this.getDirectStatus();
+            case 'get:get_maps':
+                return { result: this.localMapCatalog };
+            case 'get:get_map':
+                return this.getDirectCurrentMap();
+            case 'get:get_map_rotation':
+                return this.getDirectMapRotation();
+            case 'get:get_map_history':
+                return { result: this.localMapHistory };
+            case 'post:set_broadcast':
+                return this.executeDirectCommand('ServerBroadcast', { Message: data.message || '' }, endpoint);
+            case 'post:set_map':
+                return this.executeDirectCommand('ChangeMap', { MapName: data.map_name }, endpoint);
+            case 'post:set_map_rotation':
+                return this.setDirectNextMap(data.map_names || []);
+            case 'post:add_map_to_rotation':
+                return this.executeDirectCommand(
+                    'AddMapToRotation',
+                    { MapName: data.map_name, Index: 0 },
+                    endpoint
+                );
+            case 'post:remove_map_from_rotation':
+                return this.removeDirectMapFromRotation(data.map_name);
+            case 'post:set_team_switch_cooldown':
+                return this.executeDirectCommand(
+                    'SetTeamSwitchCooldown',
+                    { TeamSwitchTimer: data.minutes },
+                    endpoint
+                );
+            case 'post:set_idle_autokick_time':
+                return this.executeDirectCommand(
+                    'SetIdleKickDuration',
+                    { IdleTimeoutMinutes: data.minutes },
+                    endpoint
+                );
+            case 'post:set_max_ping_autokick':
+                return this.executeDirectCommand(
+                    'SetHighPingThreshold',
+                    { HighPingThresholdMs: data.max_ms },
+                    endpoint
+                );
+            default:
+                throw createUnsupportedTransportError(
+                    endpoint,
+                    `Direct RCON transport handler missing for ${method.toUpperCase()} ${endpoint}`
+                );
+        }
+    }
+
+    async executeDirectCommand(command, contentBody, endpoint = command) {
+        const response = await this.directClient.execute(command, contentBody);
+        if (response.statusCode !== 200) {
+            throw new Error(response.statusMessage || `${command} failed`);
+        }
+
+        const parsedBody = this.parseDirectContentBody(response.contentBody);
+        const normalizedResponse = {
+            result: parsedBody
+        };
+
+        if (endpoint === 'get_status') {
+            this.updateLocalMatchStateFromStatus(normalizedResponse);
+        }
+
+        return normalizedResponse;
+    }
+
+    async getDirectStatus() {
+        const statusResponse = await this.executeDirectCommand(
+            'GetServerInformation',
+            { Name: 'session', Value: '' },
+            'get_status'
+        );
+
+        const session = statusResponse.result || {};
+        const currentMapId = this.resolveMapIdFromValues([
+            session.mapId,
+            session.MapName,
+            session.mapName,
+            session.CurrentMapName,
+            session.Map,
+            session.CurrentMap,
+            session.currentMap
+        ]);
+        const resolvedMap = this.findMapById(currentMapId);
+        const rawMapName = session.mapName || session.MapName || session.currentMap || session.CurrentMapName;
+
+        const normalized = {
+            result: {
+                name: session.serverName || session.ServerName || session.name || session.Name || this.serverName,
+                current_players: readInt(
+                    session.playerCount ?? session.PlayerCount ?? session.Players ?? session.CurrentPlayers
+                ),
+                max_players: readInt(session.maxPlayerCount ?? session.MaxPlayers ?? session.MaxPlayerCount),
+                map: resolvedMap || buildMapStub(currentMapId, rawMapName),
+                current_map: resolvedMap || buildMapStub(currentMapId, rawMapName),
+                raw: session
+            }
+        };
+
+        this.updateLocalMatchStateFromStatus(normalized);
+        return normalized;
+    }
+
+    async getDirectCurrentMap() {
+        const status = await this.getDirectStatus();
+        return {
+            result: status.result.map || status.result.current_map || null
+        };
+    }
+
+    async getDirectMapRotation() {
+        const response = await this.executeDirectCommand(
+            'GetServerInformation',
+            { Name: 'maprotation', Value: '' },
+            'get_map_rotation'
+        );
+
+        return {
+            result: this.normalizeMapCollection(response.result)
+        };
+    }
+
+    async removeDirectMapFromRotation(mapName) {
+        const rotation = await this.getDirectMapRotation();
+        const mapIds = (rotation.result || []).map((entry) => entry.id);
+        const index = mapIds.findIndex((entryId) => entryId === mapName);
+        if (index === -1) {
+            return {
+                result: {
+                    removed: false,
+                    reason: 'map not found in rotation'
+                }
+            };
+        }
+
+        return this.executeDirectCommand('RemoveMapFromRotation', { Index: index }, 'remove_map_from_rotation');
+    }
+
+    async setDirectNextMap(mapNames) {
+        const mapId = Array.isArray(mapNames) ? mapNames[0] : null;
+        if (!mapId) {
+            throw new Error('set_map_rotation requires at least one map name');
+        }
+
+        const sequenceResponse = await this.executeDirectCommand(
+            'GetServerInformation',
+            { Name: 'mapsequence', Value: '' },
+            'get_map_rotation'
+        );
+        const sequence = this.normalizeMapCollection(sequenceResponse.result);
+        const existingIndex = sequence.findIndex((entry) => entry.id === mapId);
+
+        // Assumption: sequence index 0 is the next map slot, which is the closest
+        // direct-RCON equivalent to CRCON's set_map_rotation([mapId]).
+        if (existingIndex === 0) {
+            return {
+                result: {
+                    map_names: [mapId],
+                    method: 'sequence-noop'
+                }
+            };
+        }
+
+        if (existingIndex > 0) {
+            await this.executeDirectCommand(
+                'MoveMapInSequence',
+                { CurrentIndex: existingIndex, NewIndex: 0 },
+                'set_map_rotation'
+            );
+        } else {
+            await this.executeDirectCommand(
+                'AddMapToSequence',
+                { MapName: mapId, Index: 0 },
+                'set_map_rotation'
+            );
+        }
+
+        return {
+            result: {
+                map_names: [mapId],
+                method: 'sequence-index-0'
+            }
+        };
+    }
+
+    parseDirectContentBody(contentBody) {
+        if (typeof contentBody !== 'string') {
+            return contentBody;
+        }
+
+        if (!contentBody.trim()) {
+            return '';
         }
 
         try {
-            logger.debug(`CRCON POST: ${endpoint}`);
-            const response = await this.client.post(`/api/${endpoint}`, data);
-            return response.data;
+            return JSON.parse(contentBody);
         } catch (error) {
-            logger.error(`[CRCON ${this.serverName}] POST ${endpoint} failed: ${this.formatRequestError(error)}`);
-            throw error;
+            return contentBody;
         }
+    }
+
+    buildMapLookup(maps) {
+        const lookup = new Map();
+        for (const map of maps) {
+            for (const alias of [
+                map.id,
+                map.pretty_name,
+                map.map?.name,
+                map.map?.pretty_name,
+                map.id?.replace(/_warfare$/i, ''),
+                map.pretty_name?.replace(/\s+warfare$/i, '')
+            ]) {
+                const normalized = normalizeMapValue(alias);
+                if (normalized) {
+                    lookup.set(normalized, map.id);
+                }
+            }
+        }
+        return lookup;
+    }
+
+    resolveMapIdFromValues(values = []) {
+        for (const value of values) {
+            const normalized = normalizeMapValue(value);
+            if (normalized && this.mapLookup.has(normalized)) {
+                return this.mapLookup.get(normalized);
+            }
+        }
+        return null;
+    }
+
+    findMapById(mapId) {
+        if (!mapId) {
+            return null;
+        }
+
+        const matchedMap = this.localMapCatalog.find((entry) => entry.id === mapId);
+        return matchedMap ? { ...matchedMap, map: { ...matchedMap.map } } : null;
+    }
+
+    normalizeMapCollection(rawValue) {
+        const items = Array.isArray(rawValue)
+            ? rawValue
+            : Array.isArray(rawValue?.Entries)
+                ? rawValue.Entries
+                : Array.isArray(rawValue?.entries)
+                    ? rawValue.entries
+                    : Array.isArray(rawValue?.mAPS)
+                        ? rawValue.mAPS
+                    : Array.isArray(rawValue?.MapSequence)
+                        ? rawValue.MapSequence
+                        : Array.isArray(rawValue?.MapRotation)
+                            ? rawValue.MapRotation
+                            : typeof rawValue === 'string'
+                                ? rawValue.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+                                : [];
+
+        return items.map((entry) => {
+            const mapId = this.resolveMapIdFromValues([
+                entry?.MapName,
+                entry?.MapId,
+                entry?.iD,
+                entry?.map_name,
+                entry?.map_id,
+                entry?.Name,
+                entry?.name,
+                entry
+            ]);
+
+            return this.findMapById(mapId) || buildMapStub(
+                mapId,
+                entry?.MapName || entry?.name || entry?.Name || String(entry)
+            );
+        });
+    }
+
+    updateLocalMatchStateFromStatus(statusPayload) {
+        const currentMapId = this.resolveMapIdFromValues([
+            statusPayload?.result?.map?.id,
+            statusPayload?.result?.map?.pretty_name,
+            statusPayload?.result?.current_map?.id,
+            statusPayload?.result?.current_map?.pretty_name,
+            statusPayload?.result?.raw?.mapId,
+            statusPayload?.result?.raw?.mapName,
+            statusPayload?.result?.raw?.MapName,
+            statusPayload?.result?.raw?.CurrentMapName,
+            statusPayload?.result?.raw?.currentMap
+        ]);
+
+        if (!currentMapId) {
+            return;
+        }
+
+        if (!this.currentMatchMapId) {
+            this.currentMatchMapId = currentMapId;
+            this.matchStartEpochMs = Date.now();
+            return;
+        }
+
+        if (this.currentMatchMapId !== currentMapId) {
+            const previousMap = this.findMapById(this.currentMatchMapId) || buildMapStub(this.currentMatchMapId);
+            this.localMapHistory.unshift({
+                map_id: previousMap.id,
+                name: previousMap.map?.name || previousMap.id,
+                pretty_name: previousMap.pretty_name || previousMap.id,
+                changed_at: new Date().toISOString(),
+                map: {
+                    id: previousMap.id,
+                    name: previousMap.map?.name || previousMap.id,
+                    pretty_name: previousMap.pretty_name || previousMap.id
+                }
+            });
+            this.localMapHistory = this.localMapHistory.slice(0, 10);
+            this.currentMatchMapId = currentMapId;
+            this.matchStartEpochMs = Date.now();
+        }
+    }
+
+    async getMatchSnapshot() {
+        const status = await this.getStatus();
+        return {
+            currentMapId: this.resolveMapIdFromValues([
+                status?.result?.map?.id,
+                status?.result?.map?.pretty_name,
+                status?.result?.current_map?.id,
+                status?.result?.current_map?.pretty_name
+            ]),
+            currentPlayers: status?.result?.current_players ?? 0,
+            gameActive: Boolean(status?.result?.map || status?.result?.current_map),
+            matchStartEpochSeconds: this.matchStartEpochMs
+                ? Math.floor(this.matchStartEpochMs / 1000)
+                : null
+        };
     }
 
     assertCommandSucceeded(response, endpoint) {
@@ -109,7 +600,6 @@ class CRCONService {
         }
     }
 
-    // Map Voting Methods
     async getMaps() {
         return this.get('get_maps');
     }
@@ -146,7 +636,6 @@ class CRCONService {
         return this.post('remove_map_from_rotation', { map_name: mapId });
     }
 
-    // Votemap specific methods
     async getVotemapConfig() {
         return this.get('get_votemap_config');
     }
@@ -183,17 +672,14 @@ class CRCONService {
         return this.post('set_votemap_config', { enabled });
     }
 
-    // Broadcast message
     async broadcast(message) {
         return this.post('set_broadcast', { message });
     }
 
-    // Map history
     async getMapHistory() {
         return this.get('get_map_history');
     }
 
-    // Auto Mod - Solo Tank
     async describeAutoModSoloTankConfig() {
         return this.get('describe_auto_mod_solo_tank_config');
     }
@@ -218,7 +704,6 @@ class CRCONService {
         });
     }
 
-    // Auto Mod - No Leader
     async describeAutoModNoLeaderConfig() {
         return this.get('describe_auto_mod_no_leader_config');
     }
@@ -243,7 +728,6 @@ class CRCONService {
         });
     }
 
-    // Auto Mod - Level
     async describeAutoModLevelConfig() {
         return this.get('describe_auto_mod_level_config');
     }
@@ -268,7 +752,6 @@ class CRCONService {
         });
     }
 
-    // General server settings
     async getTeamSwitchCooldown() {
         return this.get('get_team_switch_cooldown');
     }
@@ -300,33 +783,73 @@ class CRCONService {
     }
 }
 
-// Create service instances
-const crconService = new CRCONService(
-    process.env.CRCON_API_URL,
-    process.env.CRCON_API_TOKEN,
-    'Server 1'
-);
+function normalizeTransportMode(value) {
+    const normalized = String(value || '').trim();
+    if (Object.values(TRANSPORT_MODES).includes(normalized)) {
+        return normalized;
+    }
+    return TRANSPORT_MODES.API_ONLY;
+}
 
-const crconService2 = process.env.CRCON_API_URL_2 ? new CRCONService(
-    process.env.CRCON_API_URL_2,
-    process.env.CRCON_API_TOKEN_2,
-    'Server 2'
-) : null;
+function normalizeMapValue(value) {
+    if (value === undefined || value === null) {
+        return null;
+    }
+    return String(value).trim().toLowerCase();
+}
 
-const crconService3 = process.env.CRCON_API_URL_3 ? new CRCONService(
-    process.env.CRCON_API_URL_3,
-    process.env.CRCON_API_TOKEN_3,
-    'Server 3'
-) : null;
+function buildMapStub(mapId, displayName = null) {
+    if (!mapId && !displayName) {
+        return null;
+    }
 
-const crconService4 = process.env.CRCON_API_URL_4 ? new CRCONService(
-    process.env.CRCON_API_URL_4,
-    process.env.CRCON_API_TOKEN_4,
-    'Server 4'
-) : null;
+    const fallbackId = mapId || normalizeMapValue(displayName)?.replace(/\s+/g, '_');
+    return {
+        id: fallbackId,
+        pretty_name: displayName || fallbackId,
+        game_mode: 'warfare',
+        environment: 'day',
+        map: {
+            id: fallbackId,
+            name: displayName || fallbackId,
+            pretty_name: displayName || fallbackId
+        }
+    };
+}
+
+function createUnsupportedTransportError(endpoint, message) {
+    const error = new Error(message);
+    error.code = 'UNSUPPORTED_TRANSPORT';
+    error.endpoint = endpoint;
+    return error;
+}
+
+function readInt(value) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function buildServiceFromEnv(serverNum = 1) {
+    const suffix = serverNum === 1 ? '' : `_${serverNum}`;
+    return new CRCONService({
+        serverName: `Server ${serverNum}`,
+        crconUrl: process.env[`CRCON_API_URL${suffix}`],
+        crconToken: process.env[`CRCON_API_TOKEN${suffix}`],
+        rconHost: process.env[`HLL_RCON_HOST${suffix}`],
+        rconPort: process.env[`HLL_RCON_PORT${suffix}`],
+        rconPassword: process.env[`HLL_RCON_PASSWORD${suffix}`],
+        transportMode: process.env[`TRANSPORT_MODE${suffix}`] || process.env.TRANSPORT_MODE
+    });
+}
+
+const crconService = buildServiceFromEnv(1);
+const crconService2 = buildServiceFromEnv(2);
+const crconService3 = buildServiceFromEnv(3);
+const crconService4 = buildServiceFromEnv(4);
 
 module.exports = {
     CRCONService,
+    TRANSPORT_MODES,
     crconService,
     crconService2,
     crconService3,

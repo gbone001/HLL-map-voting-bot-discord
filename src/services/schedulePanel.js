@@ -18,6 +18,10 @@ const { MapVotePanelService } = require('./mapVotePanel');
 const logger = require('../utils/logger');
 const automodPanelHelper = new MapVotePanelService();
 
+function isUnsupportedTransportError(error) {
+    return error?.code === 'UNSUPPORTED_TRANSPORT';
+}
+
 class SchedulePanelService {
     getDefaultScheduleGeneralSettings() {
         return {
@@ -1428,6 +1432,12 @@ class SchedulePanelService {
                 const whitelistResponse = await crconService.getVotemapWhitelist();
                 includedMapIds = whitelistResponse?.result || [];
             } catch (e) {
+                if (isUnsupportedTransportError(e)) {
+                    return {
+                        success: false,
+                        error: 'This export requires the CRCON votemap whitelist API. The active transport mode does not support it.'
+                    };
+                }
                 logger.error('[SchedulePanel] Error fetching CRCON whitelist for export:', e);
                 includedMapIds = [];
             }
@@ -1500,12 +1510,21 @@ class SchedulePanelService {
         }
         const mapById = new Map(allMaps.map(map => [map.id, map]));
 
+        const requiresCrconWhitelist = schedules.some(schedule => schedule.whitelist === null);
         let crconWhitelist = [];
-        try {
-            const whitelistResponse = await crconService.getVotemapWhitelist();
-            crconWhitelist = whitelistResponse?.result || [];
-        } catch (e) {
-            logger.error('[SchedulePanel] Error fetching CRCON whitelist for full export:', e);
+        if (requiresCrconWhitelist) {
+            try {
+                const whitelistResponse = await crconService.getVotemapWhitelist();
+                crconWhitelist = whitelistResponse?.result || [];
+            } catch (e) {
+                if (isUnsupportedTransportError(e)) {
+                    return {
+                        success: false,
+                        error: 'At least one schedule uses "Use All Maps", which requires the CRCON votemap whitelist API for export. The active transport mode does not support it.'
+                    };
+                }
+                logger.error('[SchedulePanel] Error fetching CRCON whitelist for full export:', e);
+            }
         }
 
         const sections = [];

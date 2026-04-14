@@ -91,6 +91,8 @@ class MapVotingService {
         this.statusBackoffUntil = 0;
         this.lastStatusFailureLogAt = 0;
         this.lastServerStatus = null;
+        this.lastObservedMatchMapId = null;
+        this.pendingMatchStartDetection = false;
     }
 
     // ==================== INITIALIZATION ====================
@@ -165,6 +167,10 @@ class MapVotingService {
                 return this.cachedWhitelist;
             }
         } catch (error) {
+            if (error.code === 'UNSUPPORTED_TRANSPORT') {
+                logger.warn(`[MapVoting S${this.serverNum}] CRCON whitelist unavailable on current transport; using all local maps`);
+                return null;
+            }
             logger.warn(`[MapVoting S${this.serverNum}] Could not fetch whitelist`);
         }
         return null;
@@ -230,15 +236,19 @@ class MapVotingService {
      */
     async getGameStartTime() {
         try {
-            const response = await this.crcon.get('get_public_info');
-            if (response && response.result && response.result.current_map) {
-                const startTime = response.result.current_map.start;
-                if (startTime) {
-                    // Convert to unix timestamp if needed
-                    return typeof startTime === 'number'
-                        ? startTime
-                        : Math.floor(new Date(startTime).getTime() / 1000);
+            if (typeof this.crcon?.getMatchSnapshot === 'function') {
+                const snapshot = await this.crcon.getMatchSnapshot();
+                if (snapshot?.matchStartEpochSeconds) {
+                    return snapshot.matchStartEpochSeconds;
                 }
+            }
+
+            const response = await this.crcon.get('get_public_info');
+            if (response?.result?.current_map?.start) {
+                const startTime = response.result.current_map.start;
+                return typeof startTime === 'number'
+                    ? startTime
+                    : Math.floor(new Date(startTime).getTime() / 1000);
             }
         } catch (error) {
             logger.warn(`[MapVoting S${this.serverNum}] Could not get game start time:`, error.message);
@@ -635,6 +645,38 @@ class MapVotingService {
 
     async getGameState() {
         try {
+            if (typeof this.crcon?.getMatchSnapshot === 'function') {
+                const snapshot = await this.crcon.getMatchSnapshot();
+                const currentMapId = snapshot?.currentMapId || null;
+
+                if (!currentMapId) {
+                    if (this.gameActive === null) {
+                        this.gameActive = false;
+                    }
+                    return this.gameActive;
+                }
+
+                if (!this.lastObservedMatchMapId) {
+                    this.lastObservedMatchMapId = currentMapId;
+                    this.gameActive = true;
+                    return this.gameActive;
+                }
+
+                if (this.lastObservedMatchMapId !== currentMapId) {
+                    this.lastObservedMatchMapId = currentMapId;
+                    this.pendingMatchStartDetection = true;
+                    this.gameActive = false;
+                    return this.gameActive;
+                }
+
+                if (this.pendingMatchStartDetection) {
+                    this.pendingMatchStartDetection = false;
+                }
+
+                this.gameActive = true;
+                return this.gameActive;
+            }
+
             const payload = {
                 end: 10000,
                 filter_action: ['MATCH ENDED', 'MATCH START'],

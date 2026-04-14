@@ -88,6 +88,10 @@ const LEVEL_GENERAL_FIELD_DEFS = [
 
 const LEVEL_ROLE_KEYS = ['officer', 'spotter', 'armycommander', 'tankcommander'];
 
+function isUnsupportedTransportError(error) {
+    return error?.code === 'UNSUPPORTED_TRANSPORT';
+}
+
 // Map categories for organization
 const MAP_CATEGORIES = {
     western_front: {
@@ -359,8 +363,19 @@ class MapVotePanelService {
             const allMaps = mapsResponse?.result || [];
 
             // Get current whitelist
-            const whitelistResponse = await crconService.getVotemapWhitelist();
-            const whitelist = new Set(whitelistResponse?.result || []);
+            let whitelist = new Set();
+            let whitelistUnavailable = false;
+            try {
+                const whitelistResponse = await crconService.getVotemapWhitelist();
+                whitelist = new Set(whitelistResponse?.result || []);
+            } catch (error) {
+                if (error.code === 'UNSUPPORTED_TRANSPORT') {
+                    whitelistUnavailable = true;
+                    whitelist = new Set(allMaps.map(map => map.id));
+                } else {
+                    throw error;
+                }
+            }
 
             // Filter maps
             let filteredMaps = allMaps;
@@ -392,6 +407,9 @@ class MapVotePanelService {
             const embed = new EmbedBuilder()
                 .setTitle('📋 Map Whitelist Management')
                 .setDescription(
+                    (whitelistUnavailable
+                        ? '**CRCON whitelist is unavailable on the current transport. Showing the local fallback map catalog only.**\n\n'
+                        : '') +
                     `**Legend:** ✅ = Whitelisted, ❌ = Blacklisted\n` +
                     `**Modes:** ⚔️ = Warfare, 🎯 = Offensive, 🔫 = Skirmish\n` +
                     `**Time:** ☀️ = Day, 🌤️ = Overcast, 🌙 = Night\n\n` +
@@ -436,22 +454,26 @@ class MapVotePanelService {
                     .setCustomId('mapvote_wl_night')
                     .setLabel('Night')
                     .setEmoji('🌙')
-                    .setStyle(filter === 'night' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+                    .setStyle(filter === 'night' ? ButtonStyle.Primary : ButtonStyle.Secondary)
+                    .setDisabled(whitelistUnavailable),
                 new ButtonBuilder()
                     .setCustomId('mapvote_wl_day')
                     .setLabel('Day')
                     .setEmoji('☀️')
-                    .setStyle(filter === 'day' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+                    .setStyle(filter === 'day' ? ButtonStyle.Primary : ButtonStyle.Secondary)
+                    .setDisabled(whitelistUnavailable),
                 new ButtonBuilder()
                     .setCustomId('mapvote_wl_all_on')
                     .setLabel('Whitelist All')
                     .setEmoji('✅')
-                    .setStyle(ButtonStyle.Success),
+                    .setStyle(ButtonStyle.Success)
+                    .setDisabled(whitelistUnavailable),
                 new ButtonBuilder()
                     .setCustomId('mapvote_wl_all_off')
                     .setLabel('Blacklist All')
                     .setEmoji('❌')
                     .setStyle(ButtonStyle.Danger)
+                    .setDisabled(whitelistUnavailable)
             );
 
             // Map toggle select menu
@@ -466,6 +488,7 @@ class MapVotePanelService {
                 new StringSelectMenuBuilder()
                     .setCustomId('mapvote_wl_toggle_map')
                     .setPlaceholder('Toggle individual map...')
+                    .setDisabled(whitelistUnavailable)
                     .addOptions(selectOptions.length > 0 ? selectOptions : [{ label: 'No maps', value: 'none' }])
             );
 
@@ -552,6 +575,32 @@ class MapVotePanelService {
 
             return { embeds: [embed], components: [backRow] };
         } catch (error) {
+            if (isUnsupportedTransportError(error)) {
+                const embed = new EmbedBuilder()
+                    .setTitle('🚫 Blacklisted Maps')
+                    .setColor(0xF1C40F)
+                    .setDescription(
+                        'Blacklist view is unavailable in the current transport mode.\n\n'
+                        + 'This panel depends on the CRCON votemap whitelist API, which direct RCON does not expose.'
+                    )
+                    .addFields({
+                        name: 'What To Do',
+                        value: 'Switch this server to a CRCON-backed transport mode to inspect blacklist state, or manage schedules with a custom whitelist instead of "Use All Maps".'
+                    })
+                    .setFooter({ text: 'Direct RCON does not provide the CRCON votemap whitelist' })
+                    .setTimestamp();
+
+                const backRow = new ActionRowBuilder().addComponents(
+                    new ButtonBuilder()
+                        .setCustomId('mapvote_back')
+                        .setLabel('Back to Main')
+                        .setEmoji('⬅️')
+                        .setStyle(ButtonStyle.Secondary)
+                );
+
+                return { embeds: [embed], components: [backRow] };
+            }
+
             logger.error('[MapVotePanel] Error building blacklist panel:', error);
             return { content: 'Error building blacklist panel' };
         }

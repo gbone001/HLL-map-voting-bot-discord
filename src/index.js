@@ -116,7 +116,7 @@ async function initializeServers() {
 
         if (config.configured && config.channelId) {
             // Create CRCON service
-            const crcon = new CRCONService(config.crconUrl, config.crconToken, config.serverName);
+            const crcon = new CRCONService(config);
             crconServices[serverNum] = crcon;
 
             // Create map voting service
@@ -557,6 +557,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
                 else if (customId === 'setup_edit_server') {
                     const panel = setupWizard.buildServerSelectMenu('edit');
+                    if (!panel) {
+                        return interaction.reply({ content: 'No servers configured.', flags: MessageFlags.Ephemeral });
+                    }
+                    await interaction.update(panel);
+                }
+
+                else if (customId === 'setup_edit_rcon') {
+                    const panel = setupWizard.buildServerSelectMenu('rcon');
                     if (!panel) {
                         return interaction.reply({ content: 'No servers configured.', flags: MessageFlags.Ephemeral });
                     }
@@ -1860,6 +1868,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 await interaction.showModal(modal);
             }
 
+            else if (customId === 'setup_select_rcon') {
+                if (!isServerOwner(interaction.member)) {
+                    return interaction.reply({ content: 'Only server owners can modify setup.', flags: MessageFlags.Ephemeral });
+                }
+                const serverNum = interaction.values[0];
+                const existingConfig = configManager.getServerConfig(serverNum);
+                const modal = setupWizard.buildRconModal(serverNum, existingConfig);
+                await interaction.showModal(modal);
+            }
+
             else if (customId === 'setup_select_remove') {
                 if (!isServerOwner(interaction.member)) {
                     return interaction.reply({ content: 'Only server owners can modify setup.', flags: MessageFlags.Ephemeral });
@@ -2873,6 +2891,31 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 if (result.success) {
                     await interaction.editReply({ content: result.message });
                     // Update the setup panel
+                    const channel = interaction.channel;
+                    const messages = await channel.messages.fetch({ limit: 10 });
+                    const setupMessage = messages.find(m =>
+                        m.author.id === client.user.id &&
+                        m.embeds[0]?.title === 'Seeding Bot Setup'
+                    );
+                    if (setupMessage) {
+                        await setupMessage.edit(setupWizard.buildSetupPanel());
+                    }
+                } else {
+                    await interaction.editReply({ content: result.message });
+                }
+                return;
+            }
+
+            if (customId.startsWith('setup_modal_rcon_')) {
+                if (!isServerOwner(interaction.member)) {
+                    return interaction.reply({ content: 'Only server owners can modify setup.', flags: MessageFlags.Ephemeral });
+                }
+
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+                const result = await setupWizard.saveRconFromModal(interaction);
+
+                if (result.success) {
+                    await interaction.editReply({ content: result.message });
                     const channel = interaction.channel;
                     const messages = await channel.messages.fetch({ limit: 10 });
                     const setupMessage = messages.find(m =>

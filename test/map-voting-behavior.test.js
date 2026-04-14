@@ -148,3 +148,39 @@ test('successful get_status clears degraded mode after failure', async () => {
     assert.equal(service.statusFailureCount, 0);
     assert.equal(service.statusBackoffUntil, 0);
 });
+
+test('match snapshot fallback detects a map change as a match boundary', async () => {
+    const service = new MapVotingService(1);
+    const snapshots = [
+        {
+            currentMapId: 'foy_warfare',
+            currentPlayers: 52,
+            gameActive: true,
+            matchStartEpochSeconds: 1000
+        },
+        {
+            currentMapId: 'stmariedumont_warfare',
+            currentPlayers: 48,
+            gameActive: true,
+            matchStartEpochSeconds: 2000
+        },
+        {
+            currentMapId: 'stmariedumont_warfare',
+            currentPlayers: 48,
+            gameActive: true,
+            matchStartEpochSeconds: 2000
+        }
+    ];
+
+    service.crcon = {
+        getMatchSnapshot: async () => snapshots.shift()
+    };
+
+    const firstTick = await service.getGameState();
+    const boundaryTick = await service.getGameState();
+    const resumedTick = await service.getGameState();
+
+    assert.equal(firstTick, true);
+    assert.equal(boundaryTick, false);
+    assert.equal(resumedTick, true);
+});

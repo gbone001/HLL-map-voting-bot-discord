@@ -1,12 +1,14 @@
 # Seeding Bot
 
-Standalone Discord bot for Hell Let Loose seeding management and map voting with CRCON integration.
+Standalone Discord bot for Hell Let Loose seeding management and map voting with CRCON integration plus optional direct RCON failover.
 
 ## Features
 
 - Automatic map voting when server reaches minimum players
 - Discord poll-based voting
 - CRCON whitelist integration
+- Direct HLL RCON transport for supported commands
+- CRCON API to direct-RCON failover for status, map application, broadcasts, and core server settings
 - Multi-server support (up to 4 servers)
 - Admin control panel with buttons
 - Map whitelist management
@@ -36,6 +38,8 @@ This project is ready for Railway with `railway.json`.
 2. Set environment variables in Railway:
    - `DISCORD_TOKEN` (required)
    - `CRCON_API_URL` and `CRCON_API_TOKEN` (or configure via setup wizard)
+   - optional direct-RCON settings: `HLL_RCON_HOST`, `HLL_RCON_PORT`, `HLL_RCON_PASSWORD`
+   - optional `TRANSPORT_MODE=crcon-api-with-rcon-fallback`
    - optional multi-server vars: `CRCON_API_URL_2`, `CRCON_API_TOKEN_2`, etc.
 3. Deploy with start command `npm start`
 
@@ -51,11 +55,34 @@ Notes:
 | `GUILD_ID` | Your Discord server ID |
 | `MAP_VOTE_CHANNEL_ID` | Channel for Server 1 map voting |
 | `ADMIN_CHANNEL_ID` | Channel for admin commands |
+| `TRANSPORT_MODE` | `crcon-api`, `direct-rcon`, or `crcon-api-with-rcon-fallback` |
 | `CRCON_API_URL` | CRCON API URL for Server 1 |
 | `CRCON_API_TOKEN` | CRCON API token for Server 1 |
+| `HLL_RCON_HOST` | Direct HLL RCON host for Server 1 |
+| `HLL_RCON_PORT` | Direct HLL RCON port for Server 1 |
+| `HLL_RCON_PASSWORD` | Direct HLL RCON password for Server 1 |
 | `EXCLUDE_PLAYED_MAP_FOR_XVOTES` | How many completed votes a map must sit out before it can return (default: 3) |
 
 For additional servers, add `_2`, `_3`, `_4` suffixes (e.g., `MAP_VOTE_CHANNEL_ID_2`, `EXCLUDE_PLAYED_MAP_FOR_XVOTES_2`).
+
+## Transport Modes
+
+- `crcon-api`: existing behavior; all features go through CRCON.
+- `direct-rcon`: uses direct HLL RCON only for the supported subset.
+- `crcon-api-with-rcon-fallback`: tries CRCON first, then falls back to direct RCON when the API path fails.
+
+Direct RCON currently covers:
+- server status polling
+- warfare-only local map catalog fallback
+- current/queued map operations
+- broadcasts
+- team switch cooldown, idle kick, and high-ping threshold writes
+- local in-process match tracking and map history for voting cooldowns
+
+CRCON-only features stay explicit:
+- CRCON votemap whitelist/config APIs
+- CRCON automod APIs
+- CRCON log-backed admin data
 
 ## Commands
 

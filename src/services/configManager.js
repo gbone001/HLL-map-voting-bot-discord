@@ -131,6 +131,12 @@ class ConfigManager {
         // Environment variable names
         const envUrl = normalizeEnvValue(process.env[`CRCON_API_URL${suffix}`]);
         const envToken = normalizeEnvValue(process.env[`CRCON_API_TOKEN${suffix}`]);
+        const envRconHost = normalizeEnvValue(process.env[`HLL_RCON_HOST${suffix}`]);
+        const envRconPort = normalizeEnvValue(process.env[`HLL_RCON_PORT${suffix}`]);
+        const envRconPassword = normalizeEnvValue(process.env[`HLL_RCON_PASSWORD${suffix}`]);
+        const envTransportMode = normalizeEnvValue(
+            process.env[`TRANSPORT_MODE${suffix}`] ?? process.env.TRANSPORT_MODE
+        );
         const envChannel = normalizeEnvValue(process.env[`MAP_VOTE_CHANNEL_ID${suffix}`]);
         const envExclude = normalizeEnvValue(
             process.env[`EXCLUDE_PLAYED_MAP_FOR_XVOTES${suffix}`] ?? process.env.EXCLUDE_PLAYED_MAP_FOR_XVOTES
@@ -146,14 +152,34 @@ class ConfigManager {
         const excludeFromConfig = saved?.excludePlayedMapForXvotes;
         const excludeFromEnv = parseExcludeValue(envExclude);
         const excludePlayedMapForXvotes = excludeFromEnv ?? excludeFromConfig ?? 3;
+        const transportMode = envTransportMode || saved?.transportMode || 'crcon-api';
+        const resolvedCrconUrl = envUrl || saved?.crconUrl;
+        const resolvedCrconToken = envToken || saved?.crconToken;
+        const resolvedRconHost = envRconHost || saved?.rconHost;
+        const resolvedRconPort = envRconPort || saved?.rconPort;
+        const resolvedRconPassword = envRconPassword || saved?.rconPassword;
+
+        const apiConfigured = !!resolvedCrconUrl && !!resolvedCrconToken;
+        const rconConfigured = !!resolvedRconHost && !!resolvedRconPort && !!resolvedRconPassword;
+        const configured = transportMode === 'direct-rcon'
+            ? rconConfigured
+            : transportMode === 'crcon-api-with-rcon-fallback'
+                ? (apiConfigured || rconConfigured)
+                : apiConfigured;
 
         // Merge: env overrides saved config
         return {
-            crconUrl: envUrl || saved?.crconUrl,
-            crconToken: envToken || saved?.crconToken,
+            crconUrl: resolvedCrconUrl,
+            crconToken: resolvedCrconToken,
+            rconHost: resolvedRconHost,
+            rconPort: resolvedRconPort,
+            rconPassword: resolvedRconPassword,
+            transportMode,
             channelId: envChannel || saved?.channelId,
             serverName: saved?.serverName || `Server ${serverNum}`,
-            configured: !!(envUrl || saved?.crconUrl) && !!(envToken || saved?.crconToken),
+            configured,
+            apiConfigured,
+            rconConfigured,
             excludePlayedMapForXvotes,
             nonSeededMapList: Array.isArray(saved?.nonSeededMapList) ? [...saved.nonSeededMapList] : []
         };
