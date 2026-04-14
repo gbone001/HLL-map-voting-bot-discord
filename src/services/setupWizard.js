@@ -211,12 +211,61 @@ class SetupWizard {
         return { embeds: [embed], components: [row] };
     }
 
-    buildServerModal(serverNum = null, existingConfig = null) {
+    buildTransportModeSelectPanel(action, serverNum = null, existingConfig = null) {
+        const isEdit = action === 'edit';
+        const resolvedServerNum = serverNum || this.getNextServerNumber();
+        const selectedMode = existingConfig?.transportMode || TRANSPORT_MODES.API_ONLY;
+
+        const embed = new EmbedBuilder()
+            .setTitle(isEdit ? `Select Transport - Server ${resolvedServerNum}` : `Select Transport - New Server`)
+            .setDescription('Choose how this server should connect before opening the configuration form.')
+            .setColor(0x5865F2);
+
+        const options = [
+            {
+                label: TRANSPORT_MODE_LABELS[TRANSPORT_MODES.API_ONLY],
+                description: 'Use only the CRCON HTTP API',
+                value: `${action}|${resolvedServerNum}|${TRANSPORT_MODES.API_ONLY}`,
+                default: selectedMode === TRANSPORT_MODES.API_ONLY
+            },
+            {
+                label: TRANSPORT_MODE_LABELS[TRANSPORT_MODES.API_WITH_FALLBACK],
+                description: 'Prefer CRCON and fall back to direct RCON',
+                value: `${action}|${resolvedServerNum}|${TRANSPORT_MODES.API_WITH_FALLBACK}`,
+                default: selectedMode === TRANSPORT_MODES.API_WITH_FALLBACK
+            },
+            {
+                label: TRANSPORT_MODE_LABELS[TRANSPORT_MODES.DIRECT_RCON],
+                description: 'Use direct RCON only',
+                value: `${action}|${resolvedServerNum}|${TRANSPORT_MODES.DIRECT_RCON}`,
+                default: selectedMode === TRANSPORT_MODES.DIRECT_RCON
+            }
+        ];
+
+        const row1 = new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+                .setCustomId('setup_select_transport_mode')
+                .setPlaceholder('Select a transport mode...')
+                .addOptions(options)
+        );
+
+        const row2 = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId('setup_back')
+                .setLabel('Back')
+                .setStyle(ButtonStyle.Secondary)
+        );
+
+        return { embeds: [embed], components: [row1, row2] };
+    }
+
+    buildServerModal(serverNum = null, existingConfig = null, transportMode = TRANSPORT_MODES.API_ONLY) {
         const isEdit = serverNum !== null && existingConfig !== null;
         const nextServerNum = serverNum || this.getNextServerNumber();
+        const resolvedTransportMode = this.normalizeTransportMode(transportMode);
 
         const modal = new ModalBuilder()
-            .setCustomId(`setup_modal_server_${nextServerNum}`)
+            .setCustomId(`setup_modal_server_${nextServerNum}__${resolvedTransportMode}`)
             .setTitle(isEdit ? `Edit Server ${serverNum}` : `Add Server ${nextServerNum}`);
 
         const nameInput = new TextInputBuilder()
@@ -227,15 +276,6 @@ class SetupWizard {
             .setValue(existingConfig?.serverName || '')
             .setRequired(true)
             .setMaxLength(50);
-
-        const modeInput = new TextInputBuilder()
-            .setCustomId('transport_mode')
-            .setLabel('Transport Mode')
-            .setStyle(TextInputStyle.Short)
-            .setPlaceholder(`${TRANSPORT_MODES.API_ONLY} | ${TRANSPORT_MODES.API_WITH_FALLBACK} | ${TRANSPORT_MODES.DIRECT_RCON}`)
-            .setValue(existingConfig?.transportMode || TRANSPORT_MODES.API_ONLY)
-            .setRequired(true)
-            .setMaxLength(64);
 
         const urlInput = new TextInputBuilder()
             .setCustomId('crcon_url')
@@ -263,7 +303,6 @@ class SetupWizard {
 
         modal.addComponents(
             new ActionRowBuilder().addComponents(nameInput),
-            new ActionRowBuilder().addComponents(modeInput),
             new ActionRowBuilder().addComponents(urlInput),
             new ActionRowBuilder().addComponents(tokenInput),
             new ActionRowBuilder().addComponents(channelInput)
@@ -497,10 +536,11 @@ class SetupWizard {
     }
 
     async saveServerFromModal(interaction) {
-        const serverNum = interaction.customId.split('_').pop();
+        const match = interaction.customId.match(/^setup_modal_server_(\d+)__(.+)$/);
+        const serverNum = match?.[1] || interaction.customId.split('_').pop();
         let transportMode;
         try {
-            transportMode = this.normalizeTransportMode(interaction.fields.getTextInputValue('transport_mode'));
+            transportMode = this.normalizeTransportMode(match?.[2] || TRANSPORT_MODES.API_ONLY);
         } catch (error) {
             return {
                 success: false,

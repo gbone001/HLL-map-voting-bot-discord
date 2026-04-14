@@ -551,8 +551,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                             flags: MessageFlags.Ephemeral
                         });
                     }
-                    const modal = setupWizard.buildServerModal();
-                    await interaction.showModal(modal);
+                    await interaction.update(setupWizard.buildTransportModeSelectPanel('add', nextNum));
                 }
 
                 else if (customId === 'setup_edit_server') {
@@ -1864,7 +1863,16 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 }
                 const serverNum = interaction.values[0];
                 const existingConfig = configManager.getServerConfig(serverNum);
-                const modal = setupWizard.buildServerModal(serverNum, existingConfig);
+                await interaction.update(setupWizard.buildTransportModeSelectPanel('edit', serverNum, existingConfig));
+            }
+
+            else if (customId === 'setup_select_transport_mode') {
+                if (!isServerOwner(interaction.member)) {
+                    return interaction.reply({ content: 'Only server owners can modify setup.', flags: MessageFlags.Ephemeral });
+                }
+                const [action, serverNum, transportMode] = interaction.values[0].split('|');
+                const existingConfig = action === 'edit' ? configManager.getServerConfig(serverNum) : null;
+                const modal = setupWizard.buildServerModal(serverNum, existingConfig, transportMode);
                 await interaction.showModal(modal);
             }
 
