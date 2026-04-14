@@ -288,7 +288,8 @@ class MapVotingService {
 
                     if (!isFinalized) {
                         // Resume the existing vote
-                        this.maps = existingVote.maps || await this.getMapsFromPoll(this.voteMessage.poll);
+                        const livePollMaps = await this.getMapsFromPoll(this.voteMessage.poll);
+                        this.maps = livePollMaps.length > 0 ? livePollMaps : (existingVote.maps || []);
                         logger.info(`[MapVoting S${this.serverNum}] Resumed existing vote (gameStart: ${this.gameStart})`);
                         return true;
                     }
@@ -312,6 +313,16 @@ class MapVotingService {
         }
     }
 
+    async fetchVoteMessage() {
+        if (!this.voteMessageId) {
+            return null;
+        }
+
+        const message = await this.channel.messages.fetch(this.voteMessageId);
+        this.voteMessage = message;
+        return message;
+    }
+
     /**
      * Extract maps from an existing poll (for resuming votes)
      */
@@ -330,6 +341,24 @@ class MapVotingService {
             return maps;
         } catch (error) {
             logger.error(`[MapVoting S${this.serverNum}] Error getting maps from poll:`, error.message);
+            return [];
+        }
+    }
+
+    async getCurrentPollMaps(allMaps = null) {
+        try {
+            const message = await this.fetchVoteMessage();
+            if (!message?.poll?.answers) {
+                return [];
+            }
+
+            const resolvedMaps = await this.getMapsFromPoll(message.poll);
+            if (resolvedMaps.length > 0) {
+                this.maps = resolvedMaps;
+            }
+            return resolvedMaps;
+        } catch (error) {
+            logger.error(`[MapVoting S${this.serverNum}] Error getting current poll maps:`, error.message);
             return [];
         }
     }
@@ -1019,7 +1048,7 @@ class MapVotingService {
     async getResults() {
         try {
             this.voteResults = [];
-            const message = await this.channel.messages.fetch(this.voteMessageId);
+            const message = await this.fetchVoteMessage();
 
             if (!message.poll || !message.poll.answers) {
                 return null;
@@ -1047,7 +1076,7 @@ class MapVotingService {
         }
     }
 
-    async getVoteResult(mapResults) {
+    async getVoteResult(mapResults, candidateMaps = this.maps) {
         try {
             let candidates = [];
             let voteCount = -1;
@@ -1072,7 +1101,7 @@ class MapVotingService {
 
             if (!voteResult) return null;
 
-            for (const map of this.maps) {
+            for (const map of candidateMaps || []) {
                 if (map.pretty_name === voteResult) {
                     logger.info(`[MapVoting S${this.serverNum}] Vote Result: ${map.id}`);
                     return map.id;
@@ -1091,17 +1120,19 @@ class MapVotingService {
             const allMaps = await this.getAllMaps();
             const recentMapIds = allMaps?.length > 0 ? await this.getRecentExcludedMapIds(allMaps) : new Set();
             const currentMapId = allMaps?.length > 0 ? await this.getCurrentMapId(allMaps) : null;
+            const currentPollMaps = await this.getCurrentPollMaps(allMaps);
+            const candidateMaps = currentPollMaps.length > 0 ? currentPollMaps : (Array.isArray(this.maps) ? this.maps : []);
             const mapResults = await this.getResults();
             let mapId = null;
 
             if (mapResults) {
-                mapId = await this.getVoteResult(mapResults);
+                mapId = await this.getVoteResult(mapResults, candidateMaps);
             }
 
             // If no vote result (0 votes or error), pick random from available maps
-            if (!mapId && this.maps && this.maps.length > 0) {
-                const randomIndex = Math.floor(Math.random() * this.maps.length);
-                mapId = this.maps[randomIndex].id;
+            if (!mapId && candidateMaps.length > 0) {
+                const randomIndex = Math.floor(Math.random() * candidateMaps.length);
+                mapId = candidateMaps[randomIndex].id;
                 logger.info(`[MapVoting S${this.serverNum}] No votes cast, picking random: ${mapId}`);
             }
 

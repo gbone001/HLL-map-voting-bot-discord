@@ -246,3 +246,53 @@ test('duplicate vote finalization claims do not overwrite the first selected map
         voteStore.deleteVote(gameStart, serverNum);
     }
 });
+
+test('vote finalization random fallback uses live poll options instead of stale in-memory maps', async () => {
+    const originalRandom = Math.random;
+    const service = new MapVotingService(1);
+    let selectedRotationMap = null;
+
+    service.voteMessageId = 'poll-message-1';
+    service.maps = [
+        { id: 'kursk_warfare', pretty_name: 'Kursk Warfare' },
+        { id: 'foy_warfare', pretty_name: 'Foy Warfare' }
+    ];
+    service.channel = {
+        messages: {
+            fetch: async () => ({
+                poll: {
+                    answers: new Map([
+                        ['1', { text: 'St. Marie Du Mont Warfare', voteCount: 0 }],
+                        ['2', { text: 'St. Mere Eglise Warfare', voteCount: 0 }],
+                        ['3', { text: 'Utah Beach Warfare', voteCount: 0 }]
+                    ])
+                }
+            })
+        }
+    };
+    service.crcon = {
+        post: async (_endpoint, payload) => {
+            selectedRotationMap = payload.map_names[0];
+        }
+    };
+    service.getAllMaps = async () => ([
+        { id: 'stmariedumont_warfare', pretty_name: 'St. Marie Du Mont Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'St. Marie Du Mont' } },
+        { id: 'stmereeglise_warfare', pretty_name: 'St. Mere Eglise Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'St. Mere Eglise' } },
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Utah Beach' } },
+        { id: 'kursk_warfare', pretty_name: 'Kursk Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Kursk' } }
+    ]);
+    service.getRecentExcludedMapIds = async () => new Set();
+    service.getCurrentMapId = async () => null;
+    service.getResults = async () => null;
+
+    Math.random = () => 0.99;
+
+    try {
+        const mapId = await service.setVoteResult();
+
+        assert.equal(mapId, 'utahbeach_warfare');
+        assert.equal(selectedRotationMap, 'utahbeach_warfare');
+    } finally {
+        Math.random = originalRandom;
+    }
+});
