@@ -146,6 +146,36 @@ test('fallback mode probes CRCON again after cooldown and closes the circuit on 
     }
 });
 
+test('API get_status normalizes alternative player-count field names', async () => {
+    const service = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_ONLY,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token'
+    });
+
+    service.client = {
+        get: async () => ({
+            data: {
+                result: {
+                    serverName: 'ANZR.org | Warfare 24/7 | AUS',
+                    playerCount: 97,
+                    maxPlayers: 100,
+                    mapName: 'Omaha Beach'
+                }
+            }
+        })
+    };
+
+    const response = await service.getStatus();
+
+    assert.equal(response.result.current_players, 97);
+    assert.equal(response.result.max_players, 100);
+    assert.equal(response.result.name, 'ANZR.org | Warfare 24/7 | AUS');
+    assert.equal(response.result.map.id, 'omahabeach_warfare');
+    assert.equal(response.result.current_map.id, 'omahabeach_warfare');
+});
+
 test('direct transport map catalog is warfare-only', async () => {
     const service = new CRCONService({
         serverName: 'Test Server',

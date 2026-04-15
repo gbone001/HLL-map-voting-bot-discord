@@ -205,10 +205,14 @@ class CRCONService {
                     ? await this.client.get(`/api/${endpoint}`)
                     : await this.client.post(`/api/${endpoint}`, data);
 
+                const normalizedResponse = endpoint === 'get_status'
+                    ? this.normalizeApiStatusResponse(response.data)
+                    : response.data;
+
                 if (endpoint === 'get_status') {
-                    this.updateLocalMatchStateFromStatus(response.data);
+                    this.updateLocalMatchStateFromStatus(normalizedResponse);
                 }
-                return response.data;
+                return normalizedResponse;
             } catch (error) {
                 const isStatusEndpointFailure = endpoint === 'get_status' && (error.response?.status || 0) >= 500;
                 const logMethod = isStatusEndpointFailure ? logger.warn.bind(logger) : logger.error.bind(logger);
@@ -385,6 +389,64 @@ class CRCONService {
         }
 
         return normalizedResponse;
+    }
+
+    normalizeApiStatusResponse(responseData) {
+        const session = responseData?.result || {};
+        const currentMapId = this.resolveMapIdFromValues([
+            session.map?.id,
+            session.map?.pretty_name,
+            session.map?.name,
+            session.current_map?.id,
+            session.current_map?.pretty_name,
+            session.current_map?.name,
+            session.mapId,
+            session.map_id,
+            session.MapId,
+            session.mapName,
+            session.MapName,
+            session.currentMap,
+            session.CurrentMap,
+            session.CurrentMapName,
+            session.map
+        ]);
+        const rawMapName = session.map?.pretty_name ||
+            session.map?.name ||
+            session.current_map?.pretty_name ||
+            session.current_map?.name ||
+            session.mapName ||
+            session.MapName ||
+            session.currentMap ||
+            session.CurrentMap ||
+            session.CurrentMapName;
+        const resolvedMap = this.findMapById(currentMapId);
+
+        return {
+            ...responseData,
+            result: {
+                ...session,
+                name: session.name || session.serverName || session.ServerName || session.Name || this.serverName,
+                current_players: readInt(
+                    session.current_players ??
+                    session.currentPlayers ??
+                    session.CurrentPlayers ??
+                    session.playerCount ??
+                    session.PlayerCount ??
+                    session.players ??
+                    session.Players
+                ),
+                max_players: readInt(
+                    session.max_players ??
+                    session.maxPlayers ??
+                    session.MaxPlayers ??
+                    session.maxPlayerCount ??
+                    session.MaxPlayerCount
+                ),
+                map: resolvedMap || session.map || session.current_map || buildMapStub(currentMapId, rawMapName),
+                current_map: resolvedMap || session.current_map || session.map || buildMapStub(currentMapId, rawMapName),
+                raw: session
+            }
+        };
     }
 
     async getDirectStatus() {
