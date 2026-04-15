@@ -538,6 +538,13 @@ class MapVotingService {
                 await spec.setter(configToApply);
                 logger.info(`[MapVoting S${this.serverNum}] Applied ${spec.type} ${sourceLabel} for schedule "${schedule.scheduleName}"`);
             } catch (error) {
+                if (error.code === 'UNSUPPORTED_TRANSPORT') {
+                    logger.warn(
+                        `[MapVoting S${this.serverNum}] Skipping ${spec.type} ${sourceLabel} for schedule "${schedule.scheduleName}": ${error.message}`
+                    );
+                    continue;
+                }
+
                 logger.error(`[MapVoting S${this.serverNum}] Failed applying ${spec.type} ${sourceLabel}: ${error.message}`);
             }
         }

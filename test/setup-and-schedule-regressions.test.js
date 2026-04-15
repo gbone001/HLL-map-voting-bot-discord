@@ -6,7 +6,9 @@ const path = require('node:path');
 const setupWizard = require('../src/services/setupWizard');
 const configManager = require('../src/services/configManager');
 const scheduleManager = require('../src/services/scheduleManager');
+const { MapVotingService } = require('../src/services/mapVoting');
 const { TRANSPORT_MODES } = require('../src/services/crcon');
+const logger = require('../src/utils/logger');
 
 function createServerModalInteraction({
     customId = `setup_modal_server_1__${TRANSPORT_MODES.API_WITH_FALLBACK}`,
@@ -187,5 +189,52 @@ test('schedule display formatting does not mutate stored day arrays', () => {
         assert.deepEqual(schedule.days, originalDays);
     } finally {
         scheduleManager.data = originalData;
+    }
+});
+
+test('schedule automod application warns instead of erroring for unsupported direct RCON actions', async () => {
+    const service = new MapVotingService(1);
+    const originalWarn = logger.warn;
+    const originalError = logger.error;
+    const warnMessages = [];
+    const errorMessages = [];
+    const unsupportedError = new Error('Direct RCON does not support set_auto_mod_no_leader_config for Test Server');
+    unsupportedError.code = 'UNSUPPORTED_TRANSPORT';
+
+    service.crcon = {
+        setAutoModNoLeaderConfig: async () => {
+            throw unsupportedError;
+        },
+        setAutoModLevelConfig: async () => {
+            throw new Error('level setter should not be called');
+        },
+        setAutoModSoloTankConfig: async () => {
+            throw new Error('solo tank setter should not be called');
+        }
+    };
+
+    logger.warn = (message) => {
+        warnMessages.push(message);
+    };
+    logger.error = (message) => {
+        errorMessages.push(message);
+    };
+
+    try {
+        await service.applyScheduleAutomods({
+            scheduleName: 'Off Peak Weekday',
+            automodConfigs: {
+                no_leader: { enabled: true }
+            },
+            automodProfiles: {}
+        });
+
+        assert.equal(errorMessages.length, 0);
+        assert.equal(warnMessages.length, 1);
+        assert.match(warnMessages[0], /Skipping no_leader schedule config/i);
+        assert.match(warnMessages[0], /Direct RCON does not support set_auto_mod_no_leader_config/i);
+    } finally {
+        logger.warn = originalWarn;
+        logger.error = originalError;
     }
 });
