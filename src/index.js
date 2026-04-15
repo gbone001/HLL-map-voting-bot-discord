@@ -188,10 +188,19 @@ async function followUpEphemeralAutoDelete(interaction, content, delayMs = 10000
         flags: MessageFlags.Ephemeral
     });
 
-    setTimeout(() => {
-        interaction.webhook.deleteMessage(reply.id).catch(() => {
-            // Ignore: message may already be dismissed or expired.
-        });
+    setTimeout(async () => {
+        try {
+            await interaction.webhook.deleteMessage(reply.id);
+            return;
+        } catch {
+            // Fall through and try deleting via the returned message object.
+        }
+
+        try {
+            await reply.delete();
+        } catch {
+            // Ignore: message may already be dismissed, expired, or not support direct deletion.
+        }
     }, delayMs);
 }
 
