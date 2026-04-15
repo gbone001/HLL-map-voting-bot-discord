@@ -647,6 +647,22 @@ class CRCONService {
         return matchedMap ? { ...matchedMap, map: { ...matchedMap.map } } : null;
     }
 
+    resolveObservedMapId(values = []) {
+        const canonicalMapId = this.resolveMapIdFromValues(values);
+        if (canonicalMapId) {
+            return canonicalMapId;
+        }
+
+        for (const value of values) {
+            const normalized = normalizeMapValue(value);
+            if (normalized) {
+                return normalized.replace(/\s+/g, '_');
+            }
+        }
+
+        return null;
+    }
+
     normalizeMapCollection(rawValue) {
         const items = Array.isArray(rawValue)
             ? rawValue
@@ -753,16 +769,22 @@ class CRCONService {
     }
 
     updateLocalMatchStateFromStatus(statusPayload) {
-        const currentMapId = this.resolveMapIdFromValues([
+        const currentMapId = this.resolveObservedMapId([
             statusPayload?.result?.map?.id,
             statusPayload?.result?.map?.pretty_name,
+            statusPayload?.result?.map?.name,
             statusPayload?.result?.current_map?.id,
             statusPayload?.result?.current_map?.pretty_name,
+            statusPayload?.result?.current_map?.name,
             statusPayload?.result?.raw?.mapId,
+            statusPayload?.result?.raw?.map_id,
+            statusPayload?.result?.raw?.MapId,
             statusPayload?.result?.raw?.mapName,
             statusPayload?.result?.raw?.MapName,
             statusPayload?.result?.raw?.CurrentMapName,
-            statusPayload?.result?.raw?.currentMap
+            statusPayload?.result?.raw?.currentMap,
+            statusPayload?.result?.raw?.CurrentMap,
+            statusPayload?.result?.raw?.map
         ]);
 
         if (!currentMapId) {
@@ -797,11 +819,22 @@ class CRCONService {
     async getMatchSnapshot() {
         const status = await this.getStatus();
         return {
-            currentMapId: this.resolveMapIdFromValues([
+            currentMapId: this.resolveObservedMapId([
                 status?.result?.map?.id,
                 status?.result?.map?.pretty_name,
+                status?.result?.map?.name,
                 status?.result?.current_map?.id,
-                status?.result?.current_map?.pretty_name
+                status?.result?.current_map?.pretty_name,
+                status?.result?.current_map?.name,
+                status?.result?.raw?.mapId,
+                status?.result?.raw?.map_id,
+                status?.result?.raw?.MapId,
+                status?.result?.raw?.mapName,
+                status?.result?.raw?.MapName,
+                status?.result?.raw?.CurrentMapName,
+                status?.result?.raw?.currentMap,
+                status?.result?.raw?.CurrentMap,
+                status?.result?.raw?.map
             ]),
             currentPlayers: status?.result?.current_players ?? 0,
             gameActive: Boolean(status?.result?.map || status?.result?.current_map),

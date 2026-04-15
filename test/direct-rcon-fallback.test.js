@@ -176,6 +176,33 @@ test('API get_status normalizes alternative player-count field names', async () 
     assert.equal(response.result.current_map.id, 'omahabeach_warfare');
 });
 
+test('match snapshot keeps unknown current maps active using normalized fallback ids', async () => {
+    const service = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_ONLY,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token'
+    });
+
+    service.client = {
+        get: async () => ({
+            data: {
+                result: {
+                    current_players: 97,
+                    mapName: 'Smolensk Warfare'
+                }
+            }
+        })
+    };
+
+    const snapshot = await service.getMatchSnapshot();
+
+    assert.equal(snapshot.currentPlayers, 97);
+    assert.equal(snapshot.currentMapId, 'smolensk_warfare');
+    assert.equal(snapshot.gameActive, true);
+    assert.ok(snapshot.matchStartEpochSeconds);
+});
+
 test('direct transport map catalog is warfare-only', async () => {
     const service = new CRCONService({
         serverName: 'Test Server',
