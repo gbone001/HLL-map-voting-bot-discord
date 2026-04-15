@@ -1007,16 +1007,30 @@ class MapVotingService {
     async applyNonSeededRotation() {
         try {
             const nonSeededMapList = configManager.getNonSeededMapList(this.serverNum);
-            if (!nonSeededMapList.length) {
-                return false;
-            }
-
             const allMaps = await this.getAllMaps();
             if (!allMaps?.length) {
                 return false;
             }
 
-            const desiredMapIds = new Set(nonSeededMapList);
+            let desiredMapIds = new Set(nonSeededMapList);
+            if (!desiredMapIds.size) {
+                const whitelist = await this.getEffectiveWhitelist();
+                const fallbackMaps = allMaps.filter(map => {
+                    if (this.blacklist.includes(map.id)) {
+                        return false;
+                    }
+                    if (whitelist && whitelist.size > 0 && !whitelist.has(map.id)) {
+                        return false;
+                    }
+                    return true;
+                });
+
+                desiredMapIds = new Set(fallbackMaps.map(map => map.id));
+                logger.warn(
+                    `[MapVoting S${this.serverNum}] Non-seeded map list is empty; falling back to ${desiredMapIds.size} available map(s)`
+                );
+            }
+
             const configuredMaps = allMaps.filter(map => desiredMapIds.has(map.id) && !this.blacklist.includes(map.id));
             if (!configuredMaps.length) {
                 logger.warn(`[MapVoting S${this.serverNum}] Non-seeded map list is configured but no valid maps are currently available`);
@@ -1024,12 +1038,26 @@ class MapVotingService {
             }
 
             const recentMapIds = await this.getRecentExcludedMapIds(allMaps);
-            const eligibleMaps = configuredMaps.filter(map => !recentMapIds.has(map.id));
-            const selectionPool = eligibleMaps.length > 0 ? eligibleMaps : configuredMaps;
+            const currentMapId = await this.getCurrentMapId(allMaps);
+            const alternateMaps = currentMapId
+                ? configuredMaps.filter(map => map.id !== currentMapId)
+                : configuredMaps;
+            const cooldownEligibleMaps = alternateMaps.filter(map => !recentMapIds.has(map.id));
+            const selectionPool = cooldownEligibleMaps.length > 0
+                ? cooldownEligibleMaps
+                : alternateMaps.length > 0
+                    ? alternateMaps
+                    : configuredMaps;
             const selectedMap = selectionPool[Math.floor(Math.random() * selectionPool.length)];
 
             if (!selectedMap) {
                 return false;
+            }
+
+            if (currentMapId && selectedMap.id === currentMapId) {
+                logger.warn(
+                    `[MapVoting S${this.serverNum}] Re-selecting current map ${currentMapId} because no alternative non-seeded maps were available`
+                );
             }
 
             await this.crcon.post('set_map_rotation', { map_names: [selectedMap.id] });

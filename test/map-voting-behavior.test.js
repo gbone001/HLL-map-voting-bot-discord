@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { MapVotingService } = require('../src/services/mapVoting');
 const voteStore = require('../src/services/voteStore');
+const configManager = require('../src/services/configManager');
 
 test('non-seeded rotation still applies on match end when voting is disabled', async () => {
     const service = new MapVotingService(1);
@@ -335,5 +336,78 @@ test('vote finalization random fallback uses live poll options instead of stale 
         assert.equal(selectedRotationMap, 'utahbeach_warfare');
     } finally {
         Math.random = originalRandom;
+    }
+});
+
+test('non-seeded rotation falls back to available maps when no non-seeded list is configured', async () => {
+    const originalConfig = JSON.parse(JSON.stringify(configManager.config));
+    const service = new MapVotingService(1);
+    let selectedRotationMap = null;
+
+    configManager.config.servers = {
+        ...configManager.config.servers,
+        1: {
+            ...(configManager.config.servers?.[1] || {}),
+            nonSeededMapList: []
+        }
+    };
+
+    service.blacklist = [];
+    service.getAllMaps = async () => ([
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Omaha Beach' } },
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Utah Beach' } }
+    ]);
+    service.getEffectiveWhitelist = async () => null;
+    service.getRecentExcludedMapIds = async () => new Set(['omahabeach_warfare']);
+    service.getCurrentMapId = async () => 'omahabeach_warfare';
+    service.crcon = {
+        post: async (_endpoint, payload) => {
+            selectedRotationMap = payload.map_names[0];
+        }
+    };
+
+    try {
+        const applied = await service.applyNonSeededRotation();
+
+        assert.equal(applied, true);
+        assert.equal(selectedRotationMap, 'utahbeach_warfare');
+    } finally {
+        configManager.config = originalConfig;
+    }
+});
+
+test('non-seeded rotation avoids re-selecting the current map when alternatives exist', async () => {
+    const originalConfig = JSON.parse(JSON.stringify(configManager.config));
+    const service = new MapVotingService(1);
+    let selectedRotationMap = null;
+
+    configManager.config.servers = {
+        ...configManager.config.servers,
+        1: {
+            ...(configManager.config.servers?.[1] || {}),
+            nonSeededMapList: ['omahabeach_warfare', 'utahbeach_warfare']
+        }
+    };
+
+    service.blacklist = [];
+    service.getAllMaps = async () => ([
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Omaha Beach' } },
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Utah Beach' } }
+    ]);
+    service.getRecentExcludedMapIds = async () => new Set(['omahabeach_warfare', 'utahbeach_warfare']);
+    service.getCurrentMapId = async () => 'omahabeach_warfare';
+    service.crcon = {
+        post: async (_endpoint, payload) => {
+            selectedRotationMap = payload.map_names[0];
+        }
+    };
+
+    try {
+        const applied = await service.applyNonSeededRotation();
+
+        assert.equal(applied, true);
+        assert.equal(selectedRotationMap, 'utahbeach_warfare');
+    } finally {
+        configManager.config = originalConfig;
     }
 });
