@@ -42,6 +42,28 @@ function createDefaultScheduleGeneralSettings() {
     };
 }
 
+function parseSchedulePriority(value) {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isNaN(parsed)) {
+        return 0;
+    }
+
+    return Math.min(Math.max(parsed, 0), 100);
+}
+
+function normalizeScheduleDays(days) {
+    if (!Array.isArray(days) || days.length === 0) {
+        return [...DAY_PRESETS.all];
+    }
+
+    if (days.includes('all')) {
+        return [...DAY_PRESETS.all];
+    }
+
+    const normalizedDays = DAY_ORDER.filter(day => days.includes(day));
+    return normalizedDays.length > 0 ? normalizedDays : [...DAY_PRESETS.all];
+}
+
 class ScheduleManager {
     constructor() {
         this.data = this.loadData();
@@ -61,7 +83,7 @@ class ScheduleManager {
                 if (!parsed || typeof parsed !== 'object' || !parsed.servers || typeof parsed.servers !== 'object') {
                     throw new Error('Invalid schedules.json format');
                 }
-                return parsed;
+                return this.normalizeData(parsed).data;
             }
         } catch (error) {
             logger.error('[ScheduleManager] Error loading data:', error);
@@ -71,7 +93,7 @@ class ScheduleManager {
                     const backupParsed = JSON.parse(backupContent);
                     if (backupParsed && typeof backupParsed === 'object' && backupParsed.servers && typeof backupParsed.servers === 'object') {
                         logger.warn('[ScheduleManager] Loaded schedules from backup file after primary load failed.');
-                        return backupParsed;
+                        return this.normalizeData(backupParsed).data;
                     }
                 }
             } catch (backupError) {
@@ -82,12 +104,93 @@ class ScheduleManager {
         return { servers: {} };
     }
 
+    normalizeServerConfig(serverConfig = {}) {
+        const normalizedServer = {
+            timezone: typeof serverConfig.timezone === 'string' && serverConfig.timezone.trim().length > 0
+                ? serverConfig.timezone
+                : 'America/New_York',
+            schedules: [],
+            defaultSchedule: serverConfig.defaultSchedule ?? null,
+            activeOverride: serverConfig.activeOverride ?? null
+        };
+
+        if (Array.isArray(serverConfig.schedules)) {
+            normalizedServer.schedules = serverConfig.schedules
+                .filter(schedule => schedule && typeof schedule === 'object')
+                .map(schedule => this.normalizeSchedule(schedule));
+        }
+
+        return normalizedServer;
+    }
+
+    normalizeSchedule(schedule = {}) {
+        return {
+            id: typeof schedule.id === 'string' && schedule.id.trim().length > 0
+                ? schedule.id
+                : `legacy-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+            name: typeof schedule.name === 'string' && schedule.name.trim().length > 0
+                ? schedule.name
+                : 'Unnamed Schedule',
+            startTime: typeof schedule.startTime === 'string' && schedule.startTime.trim().length > 0
+                ? schedule.startTime
+                : '00:00',
+            endTime: typeof schedule.endTime === 'string' && schedule.endTime.trim().length > 0
+                ? schedule.endTime
+                : '23:59',
+            days: normalizeScheduleDays(schedule.days),
+            priority: parseSchedulePriority(schedule.priority),
+            enabled: schedule.enabled !== false,
+            createdAt: schedule.createdAt || new Date(0).toISOString(),
+            updatedAt: schedule.updatedAt,
+            settings: {
+                minimumPlayers: schedule.settings?.minimumPlayers ?? 40,
+                deactivatePlayers: schedule.settings?.deactivatePlayers ?? 10,
+                mapsPerVote: schedule.settings?.mapsPerVote ?? 6,
+                nightMapCount: schedule.settings?.nightMapCount ?? 1
+            },
+            whitelist: Array.isArray(schedule.whitelist)
+                ? [...new Set(schedule.whitelist.filter(mapId => typeof mapId === 'string' && mapId.trim().length > 0))]
+                : null,
+            generalSettings: {
+                ...createDefaultScheduleGeneralSettings(),
+                ...(schedule.generalSettings && typeof schedule.generalSettings === 'object' ? schedule.generalSettings : {})
+            },
+            automodConfigs: {
+                level: schedule.automodConfigs?.level ?? null,
+                no_leader: schedule.automodConfigs?.no_leader ?? null,
+                solo_tank: schedule.automodConfigs?.solo_tank ?? null
+            },
+            automodProfiles: {
+                level: schedule.automodProfiles?.level ?? null,
+                no_leader: schedule.automodProfiles?.no_leader ?? null,
+                solo_tank: schedule.automodProfiles?.solo_tank ?? null
+            }
+        };
+    }
+
+    normalizeData(data = {}) {
+        const normalizedData = { servers: {} };
+        let changed = false;
+
+        for (const [serverNum, serverConfig] of Object.entries(data.servers || {})) {
+            const normalizedServer = this.normalizeServerConfig(serverConfig);
+            normalizedData.servers[serverNum] = normalizedServer;
+            if (JSON.stringify(serverConfig) !== JSON.stringify(normalizedServer)) {
+                changed = true;
+            }
+        }
+
+        return { data: normalizedData, changed };
+    }
+
     saveData() {
         try {
             const dataDir = path.dirname(SCHEDULE_PATH);
             if (!fs.existsSync(dataDir)) {
                 fs.mkdirSync(dataDir, { recursive: true });
             }
+            const normalizedResult = this.normalizeData(this.data);
+            this.data = normalizedResult.data;
             const payload = JSON.stringify(this.data, null, 2);
 
             if (fs.existsSync(SCHEDULE_PATH)) {
@@ -124,6 +227,8 @@ class ScheduleManager {
                 activeOverride: null
             };
             this.saveData();
+        } else {
+            this.data.servers[serverNum] = this.normalizeServerConfig(this.data.servers[serverNum]);
         }
         return this.data.servers[serverNum];
     }
@@ -245,6 +350,18 @@ class ScheduleManager {
         return matchesLateWindow || matchesAfterMidnightWindow;
     }
 
+    compareSchedulesByPriority(leftSchedule, rightSchedule) {
+        const leftPriority = parseSchedulePriority(leftSchedule?.priority);
+        const rightPriority = parseSchedulePriority(rightSchedule?.priority);
+        if (rightPriority !== leftPriority) {
+            return rightPriority - leftPriority;
+        }
+
+        const leftUpdatedAt = Date.parse(leftSchedule?.updatedAt || leftSchedule?.createdAt || 0);
+        const rightUpdatedAt = Date.parse(rightSchedule?.updatedAt || rightSchedule?.createdAt || 0);
+        return rightUpdatedAt - leftUpdatedAt;
+    }
+
     // Get currently active schedule (considering overrides)
     getActiveSchedule(serverNum) {
         const config = this.getServerConfig(serverNum);
@@ -273,11 +390,9 @@ class ScheduleManager {
         // Get current time
         const { time, day } = this.getCurrentTime(serverNum);
 
-        // Find matching schedules (most recently created wins on overlap)
-        // Schedules are stored in order of creation, so we reverse to get most recent first
         const matchingSchedules = [...config.schedules]
-            .reverse()
-            .filter(schedule => this.scheduleMatchesDateTime(day, time, schedule));
+            .filter(schedule => this.scheduleMatchesDateTime(day, time, schedule))
+            .sort((leftSchedule, rightSchedule) => this.compareSchedulesByPriority(leftSchedule, rightSchedule));
 
         if (matchingSchedules.length > 0) {
             return { ...matchingSchedules[0], isOverride: false };
@@ -315,6 +430,7 @@ class ScheduleManager {
             startTime: scheduleData.startTime || '00:00',
             endTime: scheduleData.endTime || '23:59',
             days: scheduleData.days || DAY_PRESETS.all,
+            priority: parseSchedulePriority(scheduleData.priority),
             enabled: true,
             createdAt: new Date().toISOString(),
             settings: {
@@ -367,6 +483,7 @@ class ScheduleManager {
         if (updates.startTime !== undefined) schedule.startTime = updates.startTime;
         if (updates.endTime !== undefined) schedule.endTime = updates.endTime;
         if (updates.days !== undefined) schedule.days = updates.days;
+        if (updates.priority !== undefined) schedule.priority = parseSchedulePriority(updates.priority);
         if (updates.enabled !== undefined) schedule.enabled = updates.enabled;
         if (updates.settings !== undefined) {
             schedule.settings = { ...schedule.settings, ...updates.settings };
@@ -556,6 +673,7 @@ class ScheduleManager {
             days: daysDisplay,
             enabled: schedule.enabled !== false,
             settings: schedule.settings,
+            priority: parseSchedulePriority(schedule.priority),
             whitelistCount: schedule.whitelist?.length || 'All'
         };
     }

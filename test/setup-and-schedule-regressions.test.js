@@ -193,6 +193,104 @@ test('schedule display formatting does not mutate stored day arrays', () => {
     }
 });
 
+test('schedule manager normalizes legacy schedule records into the current shape', () => {
+    const normalized = scheduleManager.normalizeData({
+        servers: {
+            1: {
+                timezone: '',
+                schedules: [
+                    {
+                        id: '',
+                        name: '',
+                        startTime: '',
+                        endTime: '',
+                        days: ['fri', 'bogus', 'mon', 'all'],
+                        priority: '999',
+                        enabled: undefined,
+                        settings: { minimumPlayers: 30 },
+                        whitelist: ['utahbeach_warfare', '', 'utahbeach_warfare', null],
+                        generalSettings: null,
+                        automodConfigs: {},
+                        automodProfiles: null
+                    }
+                ],
+                defaultSchedule: null,
+                activeOverride: null
+            }
+        }
+    });
+
+    const serverConfig = normalized.data.servers['1'];
+    const schedule = serverConfig.schedules[0];
+
+    assert.equal(normalized.changed, true);
+    assert.equal(serverConfig.timezone, 'America/New_York');
+    assert.equal(schedule.name, 'Unnamed Schedule');
+    assert.equal(schedule.startTime, '00:00');
+    assert.equal(schedule.endTime, '23:59');
+    assert.deepEqual(schedule.days, ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']);
+    assert.equal(schedule.priority, 100);
+    assert.equal(schedule.enabled, true);
+    assert.equal(schedule.settings.minimumPlayers, 30);
+    assert.equal(schedule.settings.deactivatePlayers, 10);
+    assert.deepEqual(schedule.whitelist, ['utahbeach_warfare']);
+    assert.deepEqual(schedule.generalSettings, {
+        teamSwitchCooldown: null,
+        idleAutokickTime: null,
+        maxPingAutokick: null,
+        mapVoteCooldownVotes: null
+    });
+    assert.deepEqual(schedule.automodProfiles, {
+        level: null,
+        no_leader: null,
+        solo_tank: null
+    });
+});
+
+test('initServer normalizes existing server schedule data before returning it', () => {
+    const originalData = scheduleManager.data;
+    const originalSaveData = scheduleManager.saveData;
+
+    scheduleManager.data = {
+        servers: {
+            1: {
+                timezone: 'UTC',
+                schedules: [
+                    {
+                        id: 'legacy-schedule',
+                        name: 'Legacy',
+                        startTime: '18:00',
+                        endTime: '23:00',
+                        days: ['sun', 'foo', 'tue'],
+                        priority: -5,
+                        enabled: true,
+                        settings: {},
+                        whitelist: 'not-an-array'
+                    }
+                ],
+                defaultSchedule: null,
+                activeOverride: null
+            }
+        }
+    };
+    scheduleManager.saveData = () => true;
+
+    try {
+        const serverConfig = scheduleManager.initServer(1);
+        assert.deepEqual(serverConfig.schedules[0].days, ['tue', 'sun']);
+        assert.equal(serverConfig.schedules[0].priority, 0);
+        assert.equal(serverConfig.schedules[0].whitelist, null);
+        assert.deepEqual(serverConfig.schedules[0].automodConfigs, {
+            level: null,
+            no_leader: null,
+            solo_tank: null
+        });
+    } finally {
+        scheduleManager.data = originalData;
+        scheduleManager.saveData = originalSaveData;
+    }
+});
+
 test('overnight schedules remain active after midnight for the previous scheduled day', () => {
     const originalData = scheduleManager.data;
     const originalGetCurrentTime = scheduleManager.getCurrentTime;
@@ -232,6 +330,68 @@ test('overnight schedules remain active after midnight for the previous schedule
         const activeSchedule = scheduleManager.getActiveSchedule(1);
         assert.equal(activeSchedule.id, 'sched-mon-late');
         assert.equal(activeSchedule.name, 'Monday Late Night');
+    } finally {
+        scheduleManager.data = originalData;
+        scheduleManager.getCurrentTime = originalGetCurrentTime;
+    }
+});
+
+test('higher schedule priority wins when multiple schedules overlap', () => {
+    const originalData = scheduleManager.data;
+    const originalGetCurrentTime = scheduleManager.getCurrentTime;
+
+    scheduleManager.data = {
+        servers: {
+            1: {
+                timezone: 'UTC',
+                schedules: [
+                    {
+                        id: 'sched-low-priority',
+                        name: 'Lower Priority',
+                        startTime: '18:00',
+                        endTime: '23:00',
+                        days: ['mon'],
+                        priority: 10,
+                        enabled: true,
+                        createdAt: '2026-04-01T00:00:00.000Z',
+                        settings: {},
+                        whitelist: null,
+                        generalSettings: {},
+                        automodConfigs: {},
+                        automodProfiles: {}
+                    },
+                    {
+                        id: 'sched-high-priority',
+                        name: 'Higher Priority',
+                        startTime: '18:00',
+                        endTime: '23:00',
+                        days: ['mon'],
+                        priority: 80,
+                        enabled: true,
+                        createdAt: '2026-03-01T00:00:00.000Z',
+                        settings: {},
+                        whitelist: null,
+                        generalSettings: {},
+                        automodConfigs: {},
+                        automodProfiles: {}
+                    }
+                ],
+                defaultSchedule: null,
+                activeOverride: null
+            }
+        }
+    };
+
+    scheduleManager.getCurrentTime = () => ({
+        time: '19:30',
+        day: 'mon',
+        timezone: 'UTC'
+    });
+
+    try {
+        const activeSchedule = scheduleManager.getActiveSchedule(1);
+        assert.equal(activeSchedule.id, 'sched-high-priority');
+        assert.equal(activeSchedule.name, 'Higher Priority');
     } finally {
         scheduleManager.data = originalData;
         scheduleManager.getCurrentTime = originalGetCurrentTime;
@@ -287,6 +447,91 @@ test('day selection panel exposes seven explicit day options while keeping prese
     }
 });
 
+test('main schedule panel exposes a first-class Edit Days action', () => {
+    const originalData = scheduleManager.data;
+    const originalGetCurrentTime = scheduleManager.getCurrentTime;
+    scheduleManager.data = {
+        servers: {
+            1: {
+                timezone: 'UTC',
+                schedules: [
+                    {
+                        id: 'sched-edit-days',
+                        name: 'Edit Days Schedule',
+                        startTime: '18:00',
+                        endTime: '23:00',
+                        days: ['mon', 'wed'],
+                        enabled: true,
+                        settings: { minimumPlayers: 25, mapsPerVote: 4, nightMapCount: 1 },
+                        whitelist: null,
+                        generalSettings: {},
+                        automodConfigs: {},
+                        automodProfiles: {}
+                    }
+                ],
+                defaultSchedule: null,
+                activeOverride: null
+            }
+        }
+    };
+    scheduleManager.getCurrentTime = () => ({ time: '18:30', day: 'mon', timezone: 'UTC' });
+
+    try {
+        const panel = schedulePanel.buildSchedulePanel(1, 'Test Server');
+        const firstRowLabels = panel.components[0].components.map(component => component.data.label);
+        const description = panel.embeds[0].data.description;
+
+        assert.deepEqual(firstRowLabels, ['Add Schedule', 'Edit Schedule', 'Edit Days', 'Manage Maps', 'Delete']);
+        assert.match(description, /7-day day picker/i);
+    } finally {
+        scheduleManager.data = originalData;
+        scheduleManager.getCurrentTime = originalGetCurrentTime;
+    }
+});
+
+test('main schedule panel exposes schedule priority controls and display', () => {
+    const originalData = scheduleManager.data;
+    const originalGetCurrentTime = scheduleManager.getCurrentTime;
+    scheduleManager.data = {
+        servers: {
+            1: {
+                timezone: 'UTC',
+                schedules: [
+                    {
+                        id: 'sched-priority',
+                        name: 'Priority Schedule',
+                        startTime: '18:00',
+                        endTime: '23:00',
+                        days: ['mon', 'wed'],
+                        priority: 55,
+                        enabled: true,
+                        settings: { minimumPlayers: 25, mapsPerVote: 4, nightMapCount: 1 },
+                        whitelist: null,
+                        generalSettings: {},
+                        automodConfigs: {},
+                        automodProfiles: {}
+                    }
+                ],
+                defaultSchedule: null,
+                activeOverride: null
+            }
+        }
+    };
+    scheduleManager.getCurrentTime = () => ({ time: '18:30', day: 'mon', timezone: 'UTC' });
+
+    try {
+        const panel = schedulePanel.buildSchedulePanel(1, 'Test Server');
+        const secondRowLabels = panel.components[1].components.map(component => component.data.label);
+        const scheduleField = panel.embeds[0].data.fields.find(field => field.name.includes('Schedules'));
+
+        assert.deepEqual(secondRowLabels, ['General Settings', 'Priority', 'Edit Automods']);
+        assert.match(scheduleField.value, /Priority: 55/);
+    } finally {
+        scheduleManager.data = originalData;
+        scheduleManager.getCurrentTime = originalGetCurrentTime;
+    }
+});
+
 test('index entrypoint handles schedule day multi-select interactions', () => {
     const filePath = path.join(__dirname, '..', 'src', 'index.js');
     const fileContent = fs.readFileSync(filePath, 'utf8');
@@ -294,6 +539,28 @@ test('index entrypoint handles schedule day multi-select interactions', () => {
     assert.match(fileContent, /schedule_days_select_/);
     assert.match(fileContent, /Schedule days updated:/);
     assert.match(fileContent, /Failed to save schedule days:/);
+});
+
+test('index entrypoint routes existing schedules through the Edit Days selection flow', () => {
+    const filePath = path.join(__dirname, '..', 'src', 'index.js');
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+
+    assert.match(fileContent, /schedule_edit_days_/);
+    assert.match(fileContent, /buildScheduleSelectPanel\(schedServerNum, 'days'\)/);
+    assert.match(fileContent, /schedule_select_days_/);
+    assert.match(fileContent, /buildDaySelectPanel\(srvNum, scheduleId\)/);
+});
+
+test('index entrypoint routes schedule priority editing through selection and modal flows', () => {
+    const filePath = path.join(__dirname, '..', 'src', 'index.js');
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+
+    assert.match(fileContent, /schedule_priority_/);
+    assert.match(fileContent, /buildScheduleSelectPanel\(srvNum, 'priority'\)/);
+    assert.match(fileContent, /schedule_select_priority_/);
+    assert.match(fileContent, /buildSchedulePriorityModal\(srvNum, schedule\)/);
+    assert.match(fileContent, /schedule_priority_modal_/);
+    assert.match(fileContent, /Priority must be a whole number between 0 and 100\./);
 });
 
 test('index entrypoint validates schedule day preset updates before reporting success', () => {

@@ -1254,6 +1254,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     await updatePanelMessage(interaction, panel);
                 }
 
+                // Edit schedule days - show selection
+                else if (customId.startsWith('schedule_edit_days_') && !customId.includes('select')) {
+                    await interaction.deferUpdate();
+                    const panel = schedulePanel.buildScheduleSelectPanel(schedServerNum, 'days');
+                    await updatePanelMessage(interaction, panel);
+                }
+
                 // Delete schedule - show selection
                 else if (customId.startsWith('schedule_delete_') && !customId.includes('select')) {
                     await interaction.deferUpdate();
@@ -1329,6 +1336,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     await interaction.deferUpdate();
                     const srvNum = parseInt(customId.split('_').pop(), 10);
                     const panel = schedulePanel.buildScheduleGeneralSelectPanel(srvNum);
+                    await updatePanelMessage(interaction, panel);
+                }
+
+                // Schedule priority - show schedule selection
+                else if (customId.startsWith('schedule_priority_') && /^schedule_priority_\d+$/.test(customId)) {
+                    await interaction.deferUpdate();
+                    const srvNum = parseInt(customId.split('_').pop(), 10);
+                    const panel = schedulePanel.buildScheduleSelectPanel(srvNum, 'priority');
                     await updatePanelMessage(interaction, panel);
                 }
 
@@ -1955,6 +1970,13 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 await interaction.showModal(modal);
             }
 
+            else if (customId.startsWith('schedule_select_days_')) {
+                const srvNum = parseInt(customId.split('_').pop(), 10);
+                const scheduleId = interaction.values[0];
+                await interaction.deferUpdate();
+                await updatePanelMessage(interaction, schedulePanel.buildDaySelectPanel(srvNum, scheduleId));
+            }
+
             else if (customId.startsWith('schedule_select_delete_')) {
                 const srvNum = parseInt(customId.split('_').pop());
                 const scheduleId = interaction.values[0];
@@ -2003,6 +2025,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 await interaction.deferUpdate();
                 const panel = schedulePanel.buildScheduleGeneralPanel(srvNum, scheduleId, generalSettings);
                 await updatePanelMessage(interaction, panel);
+            }
+
+            else if (customId.startsWith('schedule_select_priority_')) {
+                const srvNum = parseInt(customId.split('_').pop(), 10);
+                const scheduleId = interaction.values[0];
+                const schedule = getScheduleById(srvNum, scheduleId);
+                if (!schedule) {
+                    return replyEphemeralAutoDelete(interaction, 'Schedule not found.');
+                }
+
+                const modal = schedulePanel.buildSchedulePriorityModal(srvNum, schedule);
+                await interaction.showModal(modal);
             }
 
             // Select schedule automod module field to edit
@@ -2541,6 +2575,37 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 const generalSettings = await getLiveGeneralSettings(crconServices[srvNum] || crconServices[1], srvNum);
                 const panel = schedulePanel.buildScheduleGeneralPanel(srvNum, scheduleId, generalSettings);
                 await editReplyEphemeralAutoDelete(interaction, `Saved **${labelMap[settingKey]}** to this schedule.`, 10000);
+                await updatePanelMessage(interaction, panel, { preferMessageEdit: true });
+                return;
+            }
+
+            if (customId.startsWith('schedule_priority_modal_')) {
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+                const idParts = customId.replace('schedule_priority_modal_', '').split('_');
+                const srvNum = parseInt(idParts[0], 10);
+                const scheduleId = idParts.slice(1).join('_');
+                const schedule = getScheduleById(srvNum, scheduleId);
+                if (!schedule) {
+                    await interaction.editReply({ content: 'Schedule not found.' });
+                    return;
+                }
+
+                const rawPriority = interaction.fields.getTextInputValue('schedule_priority');
+                const priority = Number.parseInt(rawPriority, 10);
+                if (Number.isNaN(priority) || priority < 0 || priority > 100) {
+                    await interaction.editReply({ content: 'Priority must be a whole number between 0 and 100.' });
+                    return;
+                }
+
+                const updateResult = scheduleManager.updateSchedule(srvNum, scheduleId, { priority });
+                if (!updateResult.success) {
+                    await interaction.editReply({ content: `Failed to save schedule priority: ${updateResult.error}` });
+                    return;
+                }
+
+                const panel = schedulePanel.buildSchedulePanel(srvNum);
+                await editReplyEphemeralAutoDelete(interaction, `Saved priority **${priority}** for **${schedule.name}**.`, 10000);
                 await updatePanelMessage(interaction, panel, { preferMessageEdit: true });
                 return;
             }

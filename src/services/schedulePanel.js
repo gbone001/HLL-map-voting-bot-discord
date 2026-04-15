@@ -180,7 +180,7 @@ class SchedulePanelService {
 
                 scheduleList += `**${schedule.name}**${activeMarker}${enabledMarker}\n`;
                 scheduleList += `⏰ ${display.timeRange} | 📅 ${display.days}\n`;
-                scheduleList += `👥 Min: ${display.settings?.minimumPlayers || 'Default'} | 🗺️ Maps: ${display.whitelistCount}\n\n`;
+                scheduleList += `👥 Min: ${display.settings?.minimumPlayers || 'Default'} | 🗺️ Maps: ${display.whitelistCount} | 🔢 Priority: ${display.priority}\n\n`;
             }
 
             embed.addFields({
@@ -199,7 +199,8 @@ class SchedulePanelService {
         embed.setDescription(
             'Configure time-based map pools with different settings for different times of day.\n\n' +
             '**How it works:**\n' +
-            '• Each schedule defines a time range and days\n' +
+            '• Each schedule defines a time range and one or more active days\n' +
+            '• Use the 7-day day picker for custom weekly schedules\n' +
             '• Active schedule controls whitelist, settings, and automods\n' +
             '• Changes apply after current match ends'
         );
@@ -217,6 +218,11 @@ class SchedulePanelService {
                 .setCustomId(`schedule_edit_${serverNum}`)
                 .setLabel('Edit Schedule')
                 .setEmoji('✏️')
+                .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+                .setCustomId(`schedule_edit_days_${serverNum}`)
+                .setLabel('Edit Days')
+                .setEmoji('📅')
                 .setStyle(ButtonStyle.Primary)
                 .setDisabled(schedules.length === 0),
             new ButtonBuilder()
@@ -240,6 +246,12 @@ class SchedulePanelService {
                 .setLabel('General Settings')
                 .setEmoji('⚙️')
                 .setStyle(hasAnyScheduleGeneralOverrides ? ButtonStyle.Success : ButtonStyle.Secondary)
+                .setDisabled(schedules.length === 0),
+            new ButtonBuilder()
+                .setCustomId(`schedule_priority_${serverNum}`)
+                .setLabel('Priority')
+                .setEmoji('🔢')
+                .setStyle(ButtonStyle.Secondary)
                 .setDisabled(schedules.length === 0),
             new ButtonBuilder()
                 .setCustomId(`schedule_automods_${serverNum}`)
@@ -321,8 +333,16 @@ class SchedulePanelService {
     buildScheduleSelectPanel(serverNum, action) {
         const schedules = scheduleManager.getSchedules(serverNum);
 
+        const actionLabels = {
+            edit: 'Edit',
+            delete: 'Delete',
+            days: 'Edit Days',
+            priority: 'Edit Priority'
+        };
+        const titleAction = actionLabels[action] || `${action.charAt(0).toUpperCase() + action.slice(1)}`;
+
         const embed = new EmbedBuilder()
-            .setTitle(`Select Schedule to ${action.charAt(0).toUpperCase() + action.slice(1)}`)
+            .setTitle(`Select Schedule to ${titleAction}`)
             .setColor(action === 'delete' ? 0xE74C3C : 0x3498DB);
 
         if (schedules.length === 0) {
@@ -349,7 +369,7 @@ class SchedulePanelService {
         const selectRow = new ActionRowBuilder().addComponents(
             new StringSelectMenuBuilder()
                 .setCustomId(`schedule_select_${action}_${serverNum}`)
-                .setPlaceholder(`Select a schedule to ${action}...`)
+                .setPlaceholder(`Select a schedule to ${titleAction.toLowerCase()}...`)
                 .addOptions(options)
         );
 
@@ -1112,6 +1132,27 @@ class SchedulePanelService {
         );
 
         return { embeds: [embed], components: [presetRow, selectRow, backRow] };
+    }
+
+    buildSchedulePriorityModal(serverNum, schedule) {
+        const modal = new ModalBuilder()
+            .setCustomId(`schedule_priority_modal_${serverNum}_${schedule.id}`)
+            .setTitle(`Priority - ${schedule.name}`);
+
+        const priorityInput = new TextInputBuilder()
+            .setCustomId('schedule_priority')
+            .setLabel('Priority (0-100)')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('Higher priority wins on overlap')
+            .setValue(String(schedule.priority ?? 0))
+            .setRequired(true)
+            .setMaxLength(3);
+
+        modal.addComponents(
+            new ActionRowBuilder().addComponents(priorityInput)
+        );
+
+        return modal;
     }
 
     /**
