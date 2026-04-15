@@ -9,6 +9,10 @@ const logger = require('../utils/logger');
 const { getDataFilePath } = require('../utils/dataPath');
 
 const STORE_PATH = getDataFilePath('votes.json');
+const STORE_TMP_PATH = `${STORE_PATH}.tmp`;
+const STORE_LOCK_PATH = `${STORE_PATH}.lock`;
+const STORE_LOCK_TIMEOUT_MS = 5000;
+const STORE_LOCK_RETRY_MS = 25;
 
 class VoteStore {
     constructor() {
@@ -38,16 +42,66 @@ class VoteStore {
     }
 
     save() {
+        return this.withStoreLock(() => this.saveUnlocked());
+    }
+
+    saveUnlocked() {
         try {
             const dataDir = path.dirname(STORE_PATH);
             if (!fs.existsSync(dataDir)) {
                 fs.mkdirSync(dataDir, { recursive: true });
             }
-            fs.writeFileSync(STORE_PATH, JSON.stringify(this.votes, null, 2));
+            fs.writeFileSync(STORE_TMP_PATH, JSON.stringify(this.votes, null, 2));
+            fs.renameSync(STORE_TMP_PATH, STORE_PATH);
             return true;
         } catch (error) {
             logger.error('[VoteStore] Error saving votes:', error.message);
+            try {
+                if (fs.existsSync(STORE_TMP_PATH)) {
+                    fs.unlinkSync(STORE_TMP_PATH);
+                }
+            } catch {
+                // Ignore cleanup failures
+            }
             return false;
+        }
+    }
+
+    withStoreLock(callback) {
+        const releaseLock = this.acquireStoreLock();
+
+        try {
+            this.votes = this.load();
+            return callback();
+        } finally {
+            releaseLock();
+        }
+    }
+
+    acquireStoreLock() {
+        const startTime = Date.now();
+
+        while (true) {
+            try {
+                fs.mkdirSync(STORE_LOCK_PATH);
+                return () => {
+                    try {
+                        fs.rmSync(STORE_LOCK_PATH, { recursive: true, force: true });
+                    } catch {
+                        // Ignore unlock failures
+                    }
+                };
+            } catch (error) {
+                if (error.code !== 'EEXIST') {
+                    throw error;
+                }
+
+                if (Date.now() - startTime >= STORE_LOCK_TIMEOUT_MS) {
+                    throw new Error(`Timed out waiting for vote store lock: ${STORE_LOCK_PATH}`);
+                }
+
+                sleepSync(STORE_LOCK_RETRY_MS);
+            }
         }
     }
 
@@ -71,20 +125,21 @@ class VoteStore {
      * @param {Array} maps - Maps in the vote
      */
     setVote(messageId, gameStart, serverNum, maps = []) {
-        this.reload();
-        const key = `${serverNum}_${gameStart}`;
-        this.votes[key] = {
-            messageId,
-            gameStart,
-            serverNum,
-            maps,
-            finalizationClaim: null,
-            finalizedAt: null,
-            finalizedMapId: null,
-            createdAt: Date.now()
-        };
-        this.save();
-        logger.info(`[VoteStore] Stored vote for server ${serverNum}, gameStart ${gameStart}`);
+        this.withStoreLock(() => {
+            const key = `${serverNum}_${gameStart}`;
+            this.votes[key] = {
+                messageId,
+                gameStart,
+                serverNum,
+                maps,
+                finalizationClaim: null,
+                finalizedAt: null,
+                finalizedMapId: null,
+                createdAt: Date.now()
+            };
+            this.saveUnlocked();
+            logger.info(`[VoteStore] Stored vote for server ${serverNum}, gameStart ${gameStart}`);
+        });
     }
 
     /**
@@ -97,37 +152,38 @@ class VoteStore {
      * @returns {{ claimed: boolean, reason?: string, vote?: object }}
      */
     claimVoteFinalization(gameStart, serverNum, messageId, ownerId, ttlMs = 120000) {
-        this.reload();
-        const key = `${serverNum}_${gameStart}`;
-        const vote = this.votes[key];
+        return this.withStoreLock(() => {
+            const key = `${serverNum}_${gameStart}`;
+            const vote = this.votes[key];
 
-        if (!vote) {
-            return { claimed: false, reason: 'missing' };
-        }
+            if (!vote) {
+                return { claimed: false, reason: 'missing' };
+            }
 
-        if (messageId && vote.messageId && String(vote.messageId) !== String(messageId)) {
-            return { claimed: false, reason: 'message_mismatch', vote };
-        }
+            if (messageId && vote.messageId && String(vote.messageId) !== String(messageId)) {
+                return { claimed: false, reason: 'message_mismatch', vote };
+            }
 
-        if (vote.finalizedAt) {
-            return { claimed: false, reason: 'already_finalized', vote };
-        }
+            if (vote.finalizedAt) {
+                return { claimed: false, reason: 'already_finalized', vote };
+            }
 
-        const existingClaim = vote.finalizationClaim;
-        const now = Date.now();
-        if (existingClaim && existingClaim.ownerId !== ownerId && existingClaim.expiresAt > now) {
-            return { claimed: false, reason: 'claimed_by_other', vote };
-        }
+            const existingClaim = vote.finalizationClaim;
+            const now = Date.now();
+            if (existingClaim && existingClaim.ownerId !== ownerId && existingClaim.expiresAt > now) {
+                return { claimed: false, reason: 'claimed_by_other', vote };
+            }
 
-        vote.finalizationClaim = {
-            ownerId,
-            claimedAt: now,
-            expiresAt: now + ttlMs
-        };
+            vote.finalizationClaim = {
+                ownerId,
+                claimedAt: now,
+                expiresAt: now + ttlMs
+            };
 
-        this.save();
-        logger.info(`[VoteStore] Finalization claimed for server ${serverNum}, gameStart ${gameStart}, owner ${ownerId}`);
-        return { claimed: true, vote };
+            this.saveUnlocked();
+            logger.info(`[VoteStore] Finalization claimed for server ${serverNum}, gameStart ${gameStart}, owner ${ownerId}`);
+            return { claimed: true, vote };
+        });
     }
 
     /**
@@ -139,23 +195,24 @@ class VoteStore {
      * @returns {boolean}
      */
     completeVoteFinalization(gameStart, serverNum, ownerId, finalizedMapId = null) {
-        this.reload();
-        const key = `${serverNum}_${gameStart}`;
-        const vote = this.votes[key];
+        return this.withStoreLock(() => {
+            const key = `${serverNum}_${gameStart}`;
+            const vote = this.votes[key];
 
-        if (!vote) {
-            return false;
-        }
+            if (!vote) {
+                return false;
+            }
 
-        if (vote.finalizationClaim?.ownerId !== ownerId) {
-            return false;
-        }
+            if (vote.finalizationClaim?.ownerId !== ownerId) {
+                return false;
+            }
 
-        vote.finalizedAt = Date.now();
-        vote.finalizedMapId = finalizedMapId || null;
-        vote.finalizationClaim = null;
-        this.save();
-        return true;
+            vote.finalizedAt = Date.now();
+            vote.finalizedMapId = finalizedMapId || null;
+            vote.finalizationClaim = null;
+            this.saveUnlocked();
+            return true;
+        });
     }
 
     /**
@@ -166,18 +223,19 @@ class VoteStore {
      * @returns {boolean}
      */
     releaseVoteFinalization(gameStart, serverNum, ownerId) {
-        this.reload();
-        const key = `${serverNum}_${gameStart}`;
-        const vote = this.votes[key];
+        return this.withStoreLock(() => {
+            const key = `${serverNum}_${gameStart}`;
+            const vote = this.votes[key];
 
-        if (!vote || vote.finalizationClaim?.ownerId !== ownerId) {
-            return false;
-        }
+            if (!vote || vote.finalizationClaim?.ownerId !== ownerId) {
+                return false;
+            }
 
-        vote.finalizationClaim = null;
-        this.save();
-        logger.warn(`[VoteStore] Released finalization claim for server ${serverNum}, gameStart ${gameStart}, owner ${ownerId}`);
-        return true;
+            vote.finalizationClaim = null;
+            this.saveUnlocked();
+            logger.warn(`[VoteStore] Released finalization claim for server ${serverNum}, gameStart ${gameStart}, owner ${ownerId}`);
+            return true;
+        });
     }
 
     /**
@@ -186,34 +244,36 @@ class VoteStore {
      * @param {number} serverNum - Server number
      */
     deleteVote(gameStart, serverNum) {
-        this.reload();
-        const key = `${serverNum}_${gameStart}`;
-        if (this.votes[key]) {
-            delete this.votes[key];
-            this.save();
-            logger.info(`[VoteStore] Deleted vote for server ${serverNum}, gameStart ${gameStart}`);
-        }
+        this.withStoreLock(() => {
+            const key = `${serverNum}_${gameStart}`;
+            if (this.votes[key]) {
+                delete this.votes[key];
+                this.saveUnlocked();
+                logger.info(`[VoteStore] Deleted vote for server ${serverNum}, gameStart ${gameStart}`);
+            }
+        });
     }
 
     /**
      * Clean up old votes (older than 24 hours)
      */
     cleanup() {
-        this.reload();
-        const cutoff = Date.now() - (24 * 60 * 60 * 1000);
-        let cleaned = 0;
+        this.withStoreLock(() => {
+            const cutoff = Date.now() - (24 * 60 * 60 * 1000);
+            let cleaned = 0;
 
-        for (const key of Object.keys(this.votes)) {
-            if (this.votes[key].createdAt < cutoff) {
-                delete this.votes[key];
-                cleaned++;
+            for (const key of Object.keys(this.votes)) {
+                if (this.votes[key].createdAt < cutoff) {
+                    delete this.votes[key];
+                    cleaned++;
+                }
             }
-        }
 
-        if (cleaned > 0) {
-            this.save();
-            logger.info(`[VoteStore] Cleaned up ${cleaned} old votes`);
-        }
+            if (cleaned > 0) {
+                this.saveUnlocked();
+                logger.info(`[VoteStore] Cleaned up ${cleaned} old votes`);
+            }
+        });
     }
 
     /**
@@ -232,10 +292,15 @@ class VoteStore {
      * @param {*} value
      */
     setState(key, value) {
-        this.reload();
-        this.votes[`_state_${key}`] = value;
-        this.save();
+        this.withStoreLock(() => {
+            this.votes[`_state_${key}`] = value;
+            this.saveUnlocked();
+        });
     }
+}
+
+function sleepSync(milliseconds) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
 module.exports = new VoteStore();
