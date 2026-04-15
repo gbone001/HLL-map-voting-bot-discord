@@ -105,6 +105,47 @@ test('non-seeded rotation does not overwrite a vote finalized during seeded drop
     assert.equal(nonSeededRotationCalls, 0);
 });
 
+test('non-seeded rotation does not overwrite a vote finalized on seeded drop during a later match-end tick', async () => {
+    const service = new MapVotingService(1);
+    let stopVoteCalls = 0;
+    let nonSeededRotationCalls = 0;
+    let gameStateCallCount = 0;
+
+    service.voteMapActive = true;
+    service.seeded = true;
+    service.voteActive = true;
+    service.gameActive = true;
+    service.minimumPlayers = 50;
+    service.deactivatePlayers = 40;
+    service.applyScheduleSettings = async () => {};
+    service.getGameState = async () => {
+        gameStateCallCount += 1;
+        service.gameActive = gameStateCallCount === 1;
+        return service.gameActive;
+    };
+    service.crcon = {
+        getStatus: async () => ({ result: { current_players: 10 } })
+    };
+    service.stopVote = async () => {
+        stopVoteCalls += 1;
+        service.voteActive = false;
+        return 'utahbeach_warfare';
+    };
+    service.clearAllMessages = async () => {};
+    service.sendSeedingMsg = async () => {};
+    service.applyNonSeededRotation = async () => {
+        nonSeededRotationCalls += 1;
+        return true;
+    };
+
+    await service.doMapVote();
+    await service.doMapVote();
+
+    assert.equal(stopVoteCalls, 1);
+    assert.equal(nonSeededRotationCalls, 0);
+    assert.equal(service.skipNextUnseededMatchEndRotation, false);
+});
+
 test('get_status failures enter backoff and skip repeated polling attempts', async () => {
     const service = new MapVotingService(1);
     let statusCalls = 0;

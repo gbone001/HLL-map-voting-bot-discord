@@ -96,6 +96,7 @@ class MapVotingService {
         this.lastObservedMatchMapId = null;
         this.pendingMatchStartDetection = false;
         this.voteFinalizationInProgress = false;
+        this.skipNextUnseededMatchEndRotation = false;
     }
 
     // ==================== INITIALIZATION ====================
@@ -1213,7 +1214,7 @@ class MapVotingService {
     async stopVote() {
         if (this.voteFinalizationInProgress) {
             logger.warn(`[MapVoting S${this.serverNum}] Vote finalization already in progress; skipping duplicate stopVote`);
-            return;
+            return null;
         }
 
         this.voteFinalizationInProgress = true;
@@ -1236,7 +1237,7 @@ class MapVotingService {
                         `[MapVoting S${this.serverNum}] Skipping duplicate vote finalization for message ${voteMessageId}: ${claimResult.reason || 'unknown'}`
                     );
                     this.voteActive = false;
-                    return;
+                    return null;
                 }
 
                 finalizationClaimed = true;
@@ -1263,12 +1264,14 @@ class MapVotingService {
 
             this.voteActive = false;
             logger.info(`[MapVoting S${this.serverNum}] Vote stopped`);
+            return finalizedMapId;
         } catch (error) {
             logger.error(`[MapVoting S${this.serverNum}] Error stopping vote:`, error.message);
             if (finalizationClaimed && gameStart) {
                 voteStore.releaseVoteFinalization(gameStart, this.serverNum, finalizationOwnerId);
             }
             this.voteActive = false;
+            return null;
         } finally {
             this.voteFinalizationInProgress = false;
         }
@@ -1331,7 +1334,10 @@ class MapVotingService {
 
             if (justDroppedOutOfSeeded && this.voteActive) {
                 logger.info(`[MapVoting S${this.serverNum}] Seeded state lost while vote active, finalizing current vote`);
-                await this.stopVote();
+                const finalizedMapId = await this.stopVote();
+                if (finalizedMapId) {
+                    this.skipNextUnseededMatchEndRotation = true;
+                }
                 this.lastReminderTime = null;
                 finalizedVoteThisTick = true;
             }
@@ -1361,7 +1367,12 @@ class MapVotingService {
                 }
 
                 if (matchEnded && !finalizedVoteThisTick) {
-                    await this.applyNonSeededRotation();
+                    if (this.skipNextUnseededMatchEndRotation) {
+                        logger.info(`[MapVoting S${this.serverNum}] Skipping non-seeded rotation because a seeded vote already selected the next map`);
+                        this.skipNextUnseededMatchEndRotation = false;
+                    } else {
+                        await this.applyNonSeededRotation();
+                    }
                 }
             }
         } catch (error) {
@@ -1456,6 +1467,7 @@ class MapVotingService {
         this.lastReminderTime = null;
         this.sendSeedingMessage = true;
         this.seeded = false;
+        this.skipNextUnseededMatchEndRotation = false;
     }
 
     getStatus() {
