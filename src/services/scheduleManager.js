@@ -31,6 +31,7 @@ const DAY_PRESETS = {
     weekdays: ['mon', 'tue', 'wed', 'thu', 'fri'],
     weekend: ['sat', 'sun']
 };
+const DAY_ORDER = [...DAY_PRESETS.all];
 
 function createDefaultScheduleGeneralSettings() {
     return {
@@ -205,6 +206,45 @@ class ScheduleManager {
         return scheduleDays.includes(currentDay);
     }
 
+    getPreviousDay(day) {
+        const dayIndex = DAY_ORDER.indexOf(day);
+        if (dayIndex === -1) {
+            return null;
+        }
+
+        return DAY_ORDER[(dayIndex + DAY_ORDER.length - 1) % DAY_ORDER.length];
+    }
+
+    scheduleMatchesDateTime(currentDay, currentTime, schedule) {
+        if (!schedule?.enabled) {
+            return false;
+        }
+
+        const scheduleDays = schedule.days;
+        const startTime = schedule.startTime;
+        const endTime = schedule.endTime;
+
+        if (!startTime || !endTime) {
+            return false;
+        }
+
+        const currentMinutes = this.parseTime(currentTime);
+        const startMinutes = this.parseTime(startTime);
+        const endMinutes = this.parseTime(endTime);
+
+        if (startMinutes <= endMinutes) {
+            return this.isDayMatch(currentDay, scheduleDays) && this.isTimeInRange(currentTime, startTime, endTime);
+        }
+
+        const previousDay = this.getPreviousDay(currentDay);
+        const matchesLateWindow = this.isDayMatch(currentDay, scheduleDays) && currentMinutes >= startMinutes;
+        const matchesAfterMidnightWindow = previousDay !== null
+            && this.isDayMatch(previousDay, scheduleDays)
+            && currentMinutes < endMinutes;
+
+        return matchesLateWindow || matchesAfterMidnightWindow;
+    }
+
     // Get currently active schedule (considering overrides)
     getActiveSchedule(serverNum) {
         const config = this.getServerConfig(serverNum);
@@ -237,12 +277,7 @@ class ScheduleManager {
         // Schedules are stored in order of creation, so we reverse to get most recent first
         const matchingSchedules = [...config.schedules]
             .reverse()
-            .filter(schedule => {
-                if (!schedule.enabled) return false;
-                if (!this.isDayMatch(day, schedule.days)) return false;
-                if (!this.isTimeInRange(time, schedule.startTime, schedule.endTime)) return false;
-                return true;
-            });
+            .filter(schedule => this.scheduleMatchesDateTime(day, time, schedule));
 
         if (matchingSchedules.length > 0) {
             return { ...matchingSchedules[0], isOverride: false };

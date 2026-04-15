@@ -23,6 +23,41 @@ function isUnsupportedTransportError(error) {
 }
 
 class SchedulePanelService {
+    getDayOptions() {
+        return [
+            { label: 'Monday', value: 'mon', emoji: '1️⃣' },
+            { label: 'Tuesday', value: 'tue', emoji: '2️⃣' },
+            { label: 'Wednesday', value: 'wed', emoji: '3️⃣' },
+            { label: 'Thursday', value: 'thu', emoji: '4️⃣' },
+            { label: 'Friday', value: 'fri', emoji: '5️⃣' },
+            { label: 'Saturday', value: 'sat', emoji: '6️⃣' },
+            { label: 'Sunday', value: 'sun', emoji: '7️⃣' }
+        ];
+    }
+
+    formatSelectedDays(days = []) {
+        const sortedDays = this.getDayOptions()
+            .map(option => option.value)
+            .filter(value => days.includes(value));
+
+        if (sortedDays.length === 7) {
+            return 'All Days';
+        }
+
+        const presets = scheduleManager.getDayPresets();
+        if (JSON.stringify(sortedDays) === JSON.stringify(presets.weekdays)) {
+            return 'Weekdays';
+        }
+        if (JSON.stringify(sortedDays) === JSON.stringify(presets.weekend)) {
+            return 'Weekend';
+        }
+
+        return this.getDayOptions()
+            .filter(option => sortedDays.includes(option.value))
+            .map(option => option.label)
+            .join(', ') || 'No days selected';
+    }
+
     getDefaultScheduleGeneralSettings() {
         return {
             teamSwitchCooldown: null,
@@ -1024,25 +1059,48 @@ class SchedulePanelService {
     buildDaySelectPanel(serverNum, scheduleId) {
         const schedules = scheduleManager.getSchedules(serverNum);
         const schedule = schedules.find(s => s.id === scheduleId);
+        const selectedDays = Array.isArray(schedule?.days) && schedule.days.length > 0
+            ? schedule.days
+            : scheduleManager.getDayPresets().all;
+        const selectedDaysSet = new Set(selectedDays);
+        const dayOptions = this.getDayOptions().map(option => ({
+            label: option.label,
+            value: option.value,
+            emoji: option.emoji,
+            default: selectedDaysSet.has(option.value)
+        }));
 
         const embed = new EmbedBuilder()
             .setTitle('📅 Select Days')
-            .setDescription(`Schedule: **${schedule?.name || 'Unknown'}**\n\nSelect which days this schedule is active.`)
+            .setDescription(
+                `Schedule: **${schedule?.name || 'Unknown'}**\n\n` +
+                `Selected: **${this.formatSelectedDays(selectedDays)}**\n\n` +
+                'Use the quick presets below or pick specific days from the selector.'
+            )
             .setColor(0x3498DB);
 
-        const row = new ActionRowBuilder().addComponents(
+        const presetRow = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
                 .setCustomId(`schedule_days_all_${serverNum}_${scheduleId}`)
                 .setLabel('All Days')
-                .setStyle(ButtonStyle.Primary),
+                .setStyle(selectedDays.length === 7 ? ButtonStyle.Primary : ButtonStyle.Secondary),
             new ButtonBuilder()
                 .setCustomId(`schedule_days_weekdays_${serverNum}_${scheduleId}`)
                 .setLabel('Weekdays')
-                .setStyle(ButtonStyle.Secondary),
+                .setStyle(this.formatSelectedDays(selectedDays) === 'Weekdays' ? ButtonStyle.Primary : ButtonStyle.Secondary),
             new ButtonBuilder()
                 .setCustomId(`schedule_days_weekend_${serverNum}_${scheduleId}`)
                 .setLabel('Weekend')
-                .setStyle(ButtonStyle.Secondary)
+                .setStyle(this.formatSelectedDays(selectedDays) === 'Weekend' ? ButtonStyle.Primary : ButtonStyle.Secondary)
+        );
+
+        const selectRow = new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+                .setCustomId(`schedule_days_select_${serverNum}_${scheduleId}`)
+                .setPlaceholder('Select one or more days...')
+                .setMinValues(1)
+                .setMaxValues(dayOptions.length)
+                .addOptions(dayOptions)
         );
 
         const backRow = new ActionRowBuilder().addComponents(
@@ -1053,7 +1111,7 @@ class SchedulePanelService {
                 .setStyle(ButtonStyle.Secondary)
         );
 
-        return { embeds: [embed], components: [row, backRow] };
+        return { embeds: [embed], components: [presetRow, selectRow, backRow] };
     }
 
     /**

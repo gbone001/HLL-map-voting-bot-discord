@@ -7,6 +7,7 @@ const setupWizard = require('../src/services/setupWizard');
 const configManager = require('../src/services/configManager');
 const scheduleManager = require('../src/services/scheduleManager');
 const { MapVotingService } = require('../src/services/mapVoting');
+const schedulePanel = require('../src/services/schedulePanel');
 const { TRANSPORT_MODES } = require('../src/services/crcon');
 const logger = require('../src/utils/logger');
 
@@ -190,6 +191,125 @@ test('schedule display formatting does not mutate stored day arrays', () => {
     } finally {
         scheduleManager.data = originalData;
     }
+});
+
+test('overnight schedules remain active after midnight for the previous scheduled day', () => {
+    const originalData = scheduleManager.data;
+    const originalGetCurrentTime = scheduleManager.getCurrentTime;
+
+    scheduleManager.data = {
+        servers: {
+            1: {
+                timezone: 'UTC',
+                schedules: [
+                    {
+                        id: 'sched-mon-late',
+                        name: 'Monday Late Night',
+                        startTime: '22:00',
+                        endTime: '06:00',
+                        days: ['mon'],
+                        enabled: true,
+                        settings: { minimumPlayers: 25, mapsPerVote: 4, nightMapCount: 1 },
+                        whitelist: null,
+                        generalSettings: {},
+                        automodConfigs: {},
+                        automodProfiles: {}
+                    }
+                ],
+                defaultSchedule: null,
+                activeOverride: null
+            }
+        }
+    };
+
+    scheduleManager.getCurrentTime = () => ({
+        time: '01:30',
+        day: 'tue',
+        timezone: 'UTC'
+    });
+
+    try {
+        const activeSchedule = scheduleManager.getActiveSchedule(1);
+        assert.equal(activeSchedule.id, 'sched-mon-late');
+        assert.equal(activeSchedule.name, 'Monday Late Night');
+    } finally {
+        scheduleManager.data = originalData;
+        scheduleManager.getCurrentTime = originalGetCurrentTime;
+    }
+});
+
+test('day selection panel exposes seven explicit day options while keeping presets', () => {
+    const originalData = scheduleManager.data;
+    scheduleManager.data = {
+        servers: {
+            1: {
+                timezone: 'UTC',
+                schedules: [
+                    {
+                        id: 'sched-custom-days',
+                        name: 'Custom Days',
+                        startTime: '18:00',
+                        endTime: '23:00',
+                        days: ['mon', 'wed', 'fri'],
+                        enabled: true,
+                        settings: { minimumPlayers: 25, mapsPerVote: 4, nightMapCount: 1 },
+                        whitelist: null,
+                        generalSettings: {},
+                        automodConfigs: {},
+                        automodProfiles: {}
+                    }
+                ],
+                defaultSchedule: null,
+                activeOverride: null
+            }
+        }
+    };
+
+    try {
+        const panel = schedulePanel.buildDaySelectPanel(1, 'sched-custom-days');
+
+        assert.equal(panel.components.length, 3);
+        assert.equal(panel.components[0].components.length, 3);
+        assert.equal(panel.components[0].components[0].data.label, 'All Days');
+        assert.equal(panel.components[0].components[1].data.label, 'Weekdays');
+        assert.equal(panel.components[0].components[2].data.label, 'Weekend');
+
+        const selectMenu = panel.components[1].components[0];
+        const optionValues = selectMenu.options.map(option => option.data.value);
+        const selectedValues = selectMenu.options
+            .filter(option => option.data.default === true)
+            .map(option => option.data.value);
+
+        assert.deepEqual(optionValues, ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']);
+        assert.deepEqual(selectedValues, ['mon', 'wed', 'fri']);
+    } finally {
+        scheduleManager.data = originalData;
+    }
+});
+
+test('index entrypoint handles schedule day multi-select interactions', () => {
+    const filePath = path.join(__dirname, '..', 'src', 'index.js');
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+
+    assert.match(fileContent, /schedule_days_select_/);
+    assert.match(fileContent, /Schedule days updated:/);
+    assert.match(fileContent, /Failed to save schedule days:/);
+});
+
+test('index entrypoint validates schedule day preset updates before reporting success', () => {
+    const filePath = path.join(__dirname, '..', 'src', 'index.js');
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+
+    assert.match(fileContent, /const updateResult = scheduleManager\.updateSchedule\(srvNum, scheduleId, \{ days \}\);/);
+    assert.match(fileContent, /if \(!updateResult\.success\) \{\s*return replyEphemeralAutoDelete\(interaction, `Failed to save schedule days: \$\{updateResult\.error\}`\);/);
+});
+
+test('index entrypoint validates schedule day multi-select updates before reporting success', () => {
+    const filePath = path.join(__dirname, '..', 'src', 'index.js');
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+
+    assert.match(fileContent, /const updateResult = scheduleManager\.updateSchedule\(srvNum, scheduleId, \{ days: selectedDays \}\);/);
+    assert.match(fileContent, /if \(!updateResult\.success\) \{\s*return replyEphemeralAutoDelete\(interaction, `Failed to save schedule days: \$\{updateResult\.error\}`\);/);
 });
 
 test('schedule automod application warns instead of erroring for unsupported direct RCON actions', async () => {

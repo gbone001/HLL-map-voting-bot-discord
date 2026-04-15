@@ -1315,7 +1315,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
                     await interaction.deferUpdate();
                     const days = scheduleManager.getDayPresets()[preset];
-                    scheduleManager.updateSchedule(srvNum, scheduleId, { days });
+                    const updateResult = scheduleManager.updateSchedule(srvNum, scheduleId, { days });
+                    if (!updateResult.success) {
+                        return replyEphemeralAutoDelete(interaction, `Failed to save schedule days: ${updateResult.error}`);
+                    }
                     const panel = schedulePanel.buildSchedulePanel(srvNum, serverName);
                     await updatePanelMessage(interaction, panel);
                     await interaction.followUp({ content: `Days set to ${preset}.`, flags: MessageFlags.Ephemeral });
@@ -1922,6 +1925,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 await interaction.update(schedulePanel.buildSchedulePanel(srvNum));
                 await interaction.followUp({
                     content: `Timezone set to ${timezone}.`,
+                    flags: MessageFlags.Ephemeral
+                });
+            }
+
+            else if (customId.startsWith('schedule_days_select_')) {
+                const idParts = customId.split('_');
+                const scheduleId = idParts[idParts.length - 1];
+                const srvNum = parseInt(idParts[idParts.length - 2], 10);
+                const selectedDays = interaction.values;
+
+                const updateResult = scheduleManager.updateSchedule(srvNum, scheduleId, { days: selectedDays });
+                if (!updateResult.success) {
+                    return replyEphemeralAutoDelete(interaction, `Failed to save schedule days: ${updateResult.error}`);
+                }
+                await interaction.update(schedulePanel.buildDaySelectPanel(srvNum, scheduleId));
+                await interaction.followUp({
+                    content: `Schedule days updated: ${selectedDays.join(', ')}.`,
                     flags: MessageFlags.Ephemeral
                 });
             }
