@@ -1241,23 +1241,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     await updatePanelMessage(interaction, panel);
                 }
 
-                // Add schedule
-                else if (customId.startsWith('schedule_add_')) {
-                    const modal = schedulePanel.buildScheduleModal(schedServerNum);
-                    await interaction.showModal(modal);
-                }
-
-                // Edit schedule - show selection
-                else if (customId.startsWith('schedule_edit_') && !customId.includes('select')) {
+                // Edit or create schedule - show unified workflow selector
+                else if (customId.startsWith('schedule_manage_') || customId.startsWith('schedule_add_')) {
                     await interaction.deferUpdate();
-                    const panel = schedulePanel.buildScheduleSelectPanel(schedServerNum, 'edit');
+                    const panel = schedulePanel.buildScheduleEditorSelectPanel(schedServerNum);
                     await updatePanelMessage(interaction, panel);
                 }
 
-                // Edit schedule days - show selection
-                else if (customId.startsWith('schedule_edit_days_') && !customId.includes('select')) {
+                // Legacy edit routes
+                else if (
+                    (customId.startsWith('schedule_edit_') && !customId.includes('select'))
+                    || (customId.startsWith('schedule_edit_days_') && !customId.includes('select'))
+                ) {
                     await interaction.deferUpdate();
-                    const panel = schedulePanel.buildScheduleSelectPanel(schedServerNum, 'days');
+                    const panel = schedulePanel.buildScheduleEditorSelectPanel(schedServerNum);
                     await updatePanelMessage(interaction, panel);
                 }
 
@@ -1266,6 +1263,81 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     await interaction.deferUpdate();
                     const panel = schedulePanel.buildScheduleSelectPanel(schedServerNum, 'delete');
                     await updatePanelMessage(interaction, panel);
+                }
+
+                else if (customId.startsWith('schedule_editor_name_')) {
+                    const draft = schedulePanel.getScheduleEditorDraft(schedServerNum, interaction.user.id);
+                    if (!draft) {
+                        return replyEphemeralAutoDelete(interaction, 'Open the schedule editor first.');
+                    }
+
+                    const modal = schedulePanel.buildScheduleEditorNameModal(schedServerNum, draft);
+                    await interaction.showModal(modal);
+                }
+
+                else if (customId.startsWith('schedule_editor_time_')) {
+                    const draft = schedulePanel.getScheduleEditorDraft(schedServerNum, interaction.user.id);
+                    if (!draft) {
+                        return replyEphemeralAutoDelete(interaction, 'Open the schedule editor first.');
+                    }
+
+                    const modal = schedulePanel.buildScheduleEditorTimeModal(schedServerNum, draft);
+                    await interaction.showModal(modal);
+                }
+
+                else if (customId.startsWith('schedule_editor_settings_')) {
+                    const draft = schedulePanel.getScheduleEditorDraft(schedServerNum, interaction.user.id);
+                    if (!draft) {
+                        return replyEphemeralAutoDelete(interaction, 'Open the schedule editor first.');
+                    }
+
+                    const modal = schedulePanel.buildScheduleEditorSettingsModal(schedServerNum, draft);
+                    await interaction.showModal(modal);
+                }
+
+                else if (customId.startsWith('schedule_editor_days_')) {
+                    const srvNum = parseInt(customId.split('_').pop(), 10);
+                    const preset = customId.split('_')[3];
+                    const days = scheduleManager.getDayPresets()[preset];
+                    if (!days) {
+                        return replyEphemeralAutoDelete(interaction, 'Unknown day preset.');
+                    }
+
+                    const draft = schedulePanel.updateScheduleEditorDraft(srvNum, interaction.user.id, { days });
+                    if (!draft) {
+                        return replyEphemeralAutoDelete(interaction, 'Open the schedule editor first.');
+                    }
+
+                    await interaction.deferUpdate();
+                    await updatePanelMessage(interaction, schedulePanel.buildScheduleEditorPanel(srvNum, interaction.user.id));
+                    await followUpEphemeralAutoDelete(interaction, `Days set to ${preset}.`, 10000);
+                }
+
+                else if (customId.startsWith('schedule_editor_save_')) {
+                    const srvNum = parseInt(customId.split('_').pop(), 10);
+                    await interaction.deferUpdate();
+
+                    const result = schedulePanel.saveScheduleEditorDraft(srvNum, interaction.user.id);
+                    if (!result.success) {
+                        await followUpEphemeralAutoDelete(interaction, `Failed to save schedule: ${result.error}`, 10000);
+                        return;
+                    }
+
+                    await updatePanelMessage(interaction, schedulePanel.buildSchedulePanel(srvNum, serverName));
+                    await followUpEphemeralAutoDelete(
+                        interaction,
+                        result.isNew
+                            ? `Created schedule **${result.schedule.name}**.`
+                            : `Saved changes to **${result.schedule.name}**.`,
+                        10000
+                    );
+                }
+
+                else if (customId.startsWith('schedule_editor_cancel_')) {
+                    const srvNum = parseInt(customId.split('_').pop(), 10);
+                    schedulePanel.clearScheduleEditorDraft(srvNum, interaction.user.id);
+                    await interaction.deferUpdate();
+                    await updatePanelMessage(interaction, schedulePanel.buildSchedulePanel(srvNum, serverName));
                 }
 
                 // Timezone selection
@@ -1328,7 +1400,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     }
                     const panel = schedulePanel.buildSchedulePanel(srvNum, serverName);
                     await updatePanelMessage(interaction, panel);
-                    await interaction.followUp({ content: `Days set to ${preset}.`, flags: MessageFlags.Ephemeral });
+                    await followUpEphemeralAutoDelete(interaction, `Days set to ${preset}.`, 10000);
                 }
 
                 // Schedule general settings - show schedule selection
@@ -1727,8 +1799,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     await updatePanelMessage(interaction, panel);
                 }
 
-                // Schedule automods - show schedule selection
-                else if (customId.startsWith('schedule_automods_')) {
+                // Schedule server rules - show schedule selection
+                else if (customId.startsWith('schedule_rules_') || customId.startsWith('schedule_automods_')) {
                     await interaction.deferUpdate();
                     const srvNum = parseInt(customId.split('_').pop());
                     const panel = schedulePanel.buildScheduleAutomodSelectPanel(srvNum);
@@ -1955,10 +2027,37 @@ client.on(Events.InteractionCreate, async (interaction) => {
                     return replyEphemeralAutoDelete(interaction, `Failed to save schedule days: ${updateResult.error}`);
                 }
                 await interaction.update(schedulePanel.buildDaySelectPanel(srvNum, scheduleId));
+                await followUpEphemeralAutoDelete(interaction, `Schedule days updated: ${selectedDays.join(', ')}.`, 10000);
+            }
+
+            else if (customId.startsWith('schedule_editor_days_select_')) {
+                const srvNum = parseInt(customId.split('_').pop(), 10);
+                const selectedDays = interaction.values;
+                const draft = schedulePanel.updateScheduleEditorDraft(srvNum, interaction.user.id, { days: selectedDays });
+                if (!draft) {
+                    return replyEphemeralAutoDelete(interaction, 'Open the schedule editor first.');
+                }
+
+                await interaction.update(schedulePanel.buildScheduleEditorPanel(srvNum, interaction.user.id));
                 await interaction.followUp({
-                    content: `Schedule days updated: ${selectedDays.join(', ')}.`,
+                    content: `Draft days updated: ${selectedDays.join(', ')}.`,
                     flags: MessageFlags.Ephemeral
                 });
+            }
+
+            else if (customId.startsWith('schedule_select_manage_')) {
+                const srvNum = parseInt(customId.split('_').pop(), 10);
+                const selectedValue = interaction.values[0];
+                const draft = selectedValue === '__create_new_schedule__'
+                    ? schedulePanel.startScheduleEditor(srvNum, interaction.user.id)
+                    : schedulePanel.startScheduleEditor(srvNum, interaction.user.id, selectedValue);
+
+                if (!draft) {
+                    return replyEphemeralAutoDelete(interaction, 'Schedule not found.');
+                }
+
+                await interaction.deferUpdate();
+                await updatePanelMessage(interaction, schedulePanel.buildScheduleEditorPanel(srvNum, interaction.user.id));
             }
 
             else if (customId.startsWith('schedule_select_edit_')) {
@@ -2009,7 +2108,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
             }
 
             // Select schedule for automod editing
-            else if (customId.startsWith('schedule_select_automods_')) {
+            else if (customId.startsWith('schedule_select_rules_') || customId.startsWith('schedule_select_automods_')) {
                 const srvNum = parseInt(customId.split('_').pop(), 10);
                 const scheduleId = interaction.values[0];
                 await interaction.deferUpdate();
@@ -2469,6 +2568,79 @@ client.on(Events.InteractionCreate, async (interaction) => {
             const customId = interaction.customId;
 
             // ========== SCHEDULE MODALS ==========
+            if (customId.startsWith('schedule_editor_name_modal_')) {
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+                const srvNum = parseInt(customId.split('_').pop(), 10);
+                const name = interaction.fields.getTextInputValue('schedule_name').trim();
+                const draft = schedulePanel.updateScheduleEditorDraft(srvNum, interaction.user.id, { name });
+                if (!draft) {
+                    await interaction.editReply({ content: 'Open the schedule editor first.' });
+                    return;
+                }
+
+                await editReplyEphemeralAutoDelete(interaction, `Updated schedule name to **${name}**.`, 10000);
+                await updatePanelMessage(interaction, schedulePanel.buildScheduleEditorPanel(srvNum, interaction.user.id), { preferMessageEdit: true });
+                return;
+            }
+
+            if (customId.startsWith('schedule_editor_time_modal_')) {
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+                const srvNum = parseInt(customId.split('_').pop(), 10);
+                const startTime = interaction.fields.getTextInputValue('schedule_start');
+                const endTime = interaction.fields.getTextInputValue('schedule_end');
+                const timeRegex = /^([01]?\d|2[0-3]):([0-5]\d)$/;
+                if (!timeRegex.test(startTime) || !timeRegex.test(endTime)) {
+                    await interaction.editReply({ content: 'Invalid time format. Use HH:MM (24-hour format).' });
+                    return;
+                }
+
+                const draft = schedulePanel.updateScheduleEditorDraft(srvNum, interaction.user.id, { startTime, endTime });
+                if (!draft) {
+                    await interaction.editReply({ content: 'Open the schedule editor first.' });
+                    return;
+                }
+
+                await editReplyEphemeralAutoDelete(interaction, `Updated time range to **${startTime} - ${endTime}**.`, 10000);
+                await updatePanelMessage(interaction, schedulePanel.buildScheduleEditorPanel(srvNum, interaction.user.id), { preferMessageEdit: true });
+                return;
+            }
+
+            if (customId.startsWith('schedule_editor_settings_modal_')) {
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+                const srvNum = parseInt(customId.split('_').pop(), 10);
+                const minimumPlayers = parseInt(interaction.fields.getTextInputValue('schedule_min_players'), 10);
+                const mapsPerVote = parseInt(interaction.fields.getTextInputValue('schedule_maps_per_vote'), 10);
+
+                if (Number.isNaN(minimumPlayers) || minimumPlayers < 0 || minimumPlayers > 100) {
+                    await interaction.editReply({ content: 'Minimum players must be between 0 and 100.' });
+                    return;
+                }
+                if (Number.isNaN(mapsPerVote) || mapsPerVote < 2 || mapsPerVote > 10) {
+                    await interaction.editReply({ content: 'Maps per vote must be between 2 and 10.' });
+                    return;
+                }
+
+                const draft = schedulePanel.updateScheduleEditorDraft(srvNum, interaction.user.id, {
+                    minimumPlayers,
+                    mapsPerVote
+                });
+                if (!draft) {
+                    await interaction.editReply({ content: 'Open the schedule editor first.' });
+                    return;
+                }
+
+                await editReplyEphemeralAutoDelete(
+                    interaction,
+                    `Updated vote settings to **${minimumPlayers} min players** and **${mapsPerVote} maps per vote**.`,
+                    10000
+                );
+                await updatePanelMessage(interaction, schedulePanel.buildScheduleEditorPanel(srvNum, interaction.user.id), { preferMessageEdit: true });
+                return;
+            }
+
             if (customId.startsWith('schedule_modal_')) {
                 await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
@@ -2481,7 +2653,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
                 if (result.success) {
                     const action = result.isNew ? 'created' : 'updated';
-                    await interaction.editReply({ content: `Schedule ${action} successfully!` });
+                    await editReplyEphemeralAutoDelete(interaction, `Schedule ${action} successfully!`, 10000);
 
                     // Show day selection after create/edit so days can be changed in the same flow
                     if (result.schedule) {

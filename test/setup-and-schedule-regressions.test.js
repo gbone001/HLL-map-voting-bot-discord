@@ -447,7 +447,7 @@ test('day selection panel exposes seven explicit day options while keeping prese
     }
 });
 
-test('main schedule panel exposes a first-class Edit Days action', () => {
+test('main schedule panel exposes the new top-row schedule actions', () => {
     const originalData = scheduleManager.data;
     const originalGetCurrentTime = scheduleManager.getCurrentTime;
     scheduleManager.data = {
@@ -481,8 +481,8 @@ test('main schedule panel exposes a first-class Edit Days action', () => {
         const firstRowLabels = panel.components[0].components.map(component => component.data.label);
         const description = panel.embeds[0].data.description;
 
-        assert.deepEqual(firstRowLabels, ['Add Schedule', 'Edit Schedule', 'Edit Days', 'Manage Maps', 'Delete']);
-        assert.match(description, /7-day day picker/i);
+        assert.deepEqual(firstRowLabels, ['Edit/Create Schedule', 'Assign Map Pools', 'Assign Server Rules', 'Delete']);
+        assert.match(description, /one guided workflow/i);
     } finally {
         scheduleManager.data = originalData;
         scheduleManager.getCurrentTime = originalGetCurrentTime;
@@ -522,9 +522,11 @@ test('main schedule panel exposes schedule priority controls and display', () =>
     try {
         const panel = schedulePanel.buildSchedulePanel(1, 'Test Server');
         const secondRowLabels = panel.components[1].components.map(component => component.data.label);
+        const thirdRowLabels = panel.components[2].components.map(component => component.data.label);
         const scheduleField = panel.embeds[0].data.fields.find(field => field.name.includes('Schedules'));
 
-        assert.deepEqual(secondRowLabels, ['General Settings', 'Priority', 'Edit Automods']);
+        assert.deepEqual(secondRowLabels, ['General Settings', 'Priority', 'Set Timezone']);
+        assert.deepEqual(thirdRowLabels, ['Override', 'Clear Override', 'Back']);
         assert.match(scheduleField.value, /Priority: 55/);
     } finally {
         scheduleManager.data = originalData;
@@ -532,23 +534,81 @@ test('main schedule panel exposes schedule priority controls and display', () =>
     }
 });
 
-test('index entrypoint handles schedule day multi-select interactions', () => {
-    const filePath = path.join(__dirname, '..', 'src', 'index.js');
-    const fileContent = fs.readFileSync(filePath, 'utf8');
+test('schedule editor selector includes existing schedules and a create-new option', () => {
+    const originalData = scheduleManager.data;
+    scheduleManager.data = {
+        servers: {
+            1: {
+                timezone: 'UTC',
+                schedules: [
+                    {
+                        id: 'sched-existing',
+                        name: 'Existing Schedule',
+                        startTime: '18:00',
+                        endTime: '23:00',
+                        days: ['mon', 'tue'],
+                        enabled: true,
+                        settings: { minimumPlayers: 25, mapsPerVote: 4, nightMapCount: 1 },
+                        whitelist: null,
+                        generalSettings: {},
+                        automodConfigs: {},
+                        automodProfiles: {}
+                    }
+                ],
+                defaultSchedule: null,
+                activeOverride: null
+            }
+        }
+    };
 
-    assert.match(fileContent, /schedule_days_select_/);
-    assert.match(fileContent, /Schedule days updated:/);
-    assert.match(fileContent, /Failed to save schedule days:/);
+    try {
+        const panel = schedulePanel.buildScheduleEditorSelectPanel(1);
+        const options = panel.components[0].components[0].options.map(option => option.data);
+
+        assert.equal(options[0].label, 'Existing Schedule');
+        assert.equal(options[options.length - 1].label, 'Create New Schedule');
+        assert.equal(options[options.length - 1].value, '__create_new_schedule__');
+    } finally {
+        scheduleManager.data = originalData;
+    }
 });
 
-test('index entrypoint routes existing schedules through the Edit Days selection flow', () => {
+test('schedule editor panel keeps name, days, and time in one workflow', () => {
+    const draft = schedulePanel.startScheduleEditor(1, 'user-1');
+
+    try {
+        const panel = schedulePanel.buildScheduleEditorPanel(1, 'user-1');
+        const rowOneLabels = panel.components[0].components.map(component => component.data.label);
+        const rowFourLabels = panel.components[3].components.map(component => component.data.label);
+
+        assert.equal(draft.isNew, true);
+        assert.deepEqual(rowOneLabels, ['Edit Name', 'Edit Time', 'Edit Vote Settings']);
+        assert.deepEqual(rowFourLabels, ['Create Schedule', 'Cancel']);
+        assert.match(panel.embeds[0].data.description, /\*\*Name:\*\* New Schedule/);
+        assert.match(panel.embeds[0].data.description, /\*\*Days:\*\* All Days/);
+        assert.match(panel.embeds[0].data.description, /\*\*Time Range:\*\* 18:00 - 23:00/);
+    } finally {
+        schedulePanel.clearScheduleEditorDraft(1, 'user-1');
+    }
+});
+
+test('index entrypoint handles schedule editor day multi-select interactions', () => {
     const filePath = path.join(__dirname, '..', 'src', 'index.js');
     const fileContent = fs.readFileSync(filePath, 'utf8');
 
-    assert.match(fileContent, /schedule_edit_days_/);
-    assert.match(fileContent, /buildScheduleSelectPanel\(schedServerNum, 'days'\)/);
-    assert.match(fileContent, /schedule_select_days_/);
-    assert.match(fileContent, /buildDaySelectPanel\(srvNum, scheduleId\)/);
+    assert.match(fileContent, /schedule_editor_days_select_/);
+    assert.match(fileContent, /Draft days updated:/);
+});
+
+test('index entrypoint routes schedule management through the unified editor workflow', () => {
+    const filePath = path.join(__dirname, '..', 'src', 'index.js');
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+
+    assert.match(fileContent, /schedule_manage_/);
+    assert.match(fileContent, /buildScheduleEditorSelectPanel\(schedServerNum\)/);
+    assert.match(fileContent, /schedule_select_manage_/);
+    assert.match(fileContent, /startScheduleEditor\(srvNum, interaction\.user\.id/);
+    assert.match(fileContent, /buildScheduleEditorPanel\(srvNum, interaction\.user\.id\)/);
 });
 
 test('index entrypoint routes schedule priority editing through selection and modal flows', () => {
@@ -577,6 +637,15 @@ test('index entrypoint validates schedule day multi-select updates before report
 
     assert.match(fileContent, /const updateResult = scheduleManager\.updateSchedule\(srvNum, scheduleId, \{ days: selectedDays \}\);/);
     assert.match(fileContent, /if \(!updateResult\.success\) \{\s*return replyEphemeralAutoDelete\(interaction, `Failed to save schedule days: \$\{updateResult\.error\}`\);/);
+});
+
+test('main schedule panel renames automod management to server rules', () => {
+    const filePath = path.join(__dirname, '..', 'src', 'services', 'schedulePanel.js');
+    const fileContent = fs.readFileSync(filePath, 'utf8');
+
+    assert.match(fileContent, /Assign Server Rules/);
+    assert.match(fileContent, /Assign Map Pools/);
+    assert.match(fileContent, /Edit\/Create Schedule/);
 });
 
 test('schedule automod application warns instead of erroring for unsupported direct RCON actions', async () => {

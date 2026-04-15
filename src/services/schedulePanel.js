@@ -23,6 +23,151 @@ function isUnsupportedTransportError(error) {
 }
 
 class SchedulePanelService {
+    constructor() {
+        this.scheduleEditorDrafts = new Map();
+    }
+
+    getScheduleEditorDraftKey(serverNum, userId) {
+        return `${serverNum}:${userId}`;
+    }
+
+    createEmptyScheduleDraft() {
+        return {
+            scheduleId: null,
+            isNew: true,
+            name: 'New Schedule',
+            startTime: '18:00',
+            endTime: '23:00',
+            days: [...scheduleManager.getDayPresets().all],
+            minimumPlayers: 40,
+            mapsPerVote: 6
+        };
+    }
+
+    createDraftFromSchedule(schedule) {
+        return {
+            scheduleId: schedule.id,
+            isNew: false,
+            name: schedule.name,
+            startTime: schedule.startTime,
+            endTime: schedule.endTime,
+            days: Array.isArray(schedule.days) && schedule.days.length > 0
+                ? [...schedule.days]
+                : [...scheduleManager.getDayPresets().all],
+            minimumPlayers: schedule.settings?.minimumPlayers ?? 40,
+            mapsPerVote: schedule.settings?.mapsPerVote ?? 6
+        };
+    }
+
+    startScheduleEditor(serverNum, userId, scheduleId = null) {
+        const draft = scheduleId
+            ? this.createDraftFromSchedule(
+                scheduleManager.getSchedules(serverNum).find(schedule => schedule.id === scheduleId) || {}
+            )
+            : this.createEmptyScheduleDraft();
+
+        if (scheduleId && !draft.scheduleId) {
+            return null;
+        }
+
+        this.scheduleEditorDrafts.set(this.getScheduleEditorDraftKey(serverNum, userId), draft);
+        return draft;
+    }
+
+    getScheduleEditorDraft(serverNum, userId) {
+        const draft = this.scheduleEditorDrafts.get(this.getScheduleEditorDraftKey(serverNum, userId));
+        return draft ? { ...draft, days: [...draft.days] } : null;
+    }
+
+    updateScheduleEditorDraft(serverNum, userId, updates) {
+        const draftKey = this.getScheduleEditorDraftKey(serverNum, userId);
+        const currentDraft = this.scheduleEditorDrafts.get(draftKey);
+        if (!currentDraft) {
+            return null;
+        }
+
+        const nextDraft = {
+            ...currentDraft,
+            ...updates
+        };
+        if (updates.days !== undefined) {
+            nextDraft.days = [...updates.days];
+        }
+
+        this.scheduleEditorDrafts.set(draftKey, nextDraft);
+        return { ...nextDraft, days: [...nextDraft.days] };
+    }
+
+    clearScheduleEditorDraft(serverNum, userId) {
+        this.scheduleEditorDrafts.delete(this.getScheduleEditorDraftKey(serverNum, userId));
+    }
+
+    validateScheduleDraft(draft) {
+        const timeRegex = /^([01]?\d|2[0-3]):([0-5]\d)$/;
+        if (!draft.name || !draft.name.trim()) {
+            return { success: false, error: 'Schedule name is required.' };
+        }
+        if (!timeRegex.test(draft.startTime) || !timeRegex.test(draft.endTime)) {
+            return { success: false, error: 'Invalid time format. Use HH:MM (24-hour format).' };
+        }
+        if (!Number.isInteger(draft.minimumPlayers) || draft.minimumPlayers < 0 || draft.minimumPlayers > 100) {
+            return { success: false, error: 'Minimum players must be between 0 and 100.' };
+        }
+        if (!Number.isInteger(draft.mapsPerVote) || draft.mapsPerVote < 2 || draft.mapsPerVote > 10) {
+            return { success: false, error: 'Maps per vote must be between 2 and 10.' };
+        }
+
+        return { success: true };
+    }
+
+    saveScheduleEditorDraft(serverNum, userId) {
+        const draft = this.getScheduleEditorDraft(serverNum, userId);
+        if (!draft) {
+            return { success: false, error: 'No schedule editor session found.' };
+        }
+
+        const validation = this.validateScheduleDraft(draft);
+        if (!validation.success) {
+            return validation;
+        }
+
+        if (draft.scheduleId) {
+            const result = scheduleManager.updateSchedule(serverNum, draft.scheduleId, {
+                name: draft.name.trim(),
+                startTime: draft.startTime,
+                endTime: draft.endTime,
+                days: draft.days,
+                settings: {
+                    minimumPlayers: draft.minimumPlayers,
+                    mapsPerVote: draft.mapsPerVote
+                }
+            });
+
+            if (!result.success) {
+                return result;
+            }
+
+            this.clearScheduleEditorDraft(serverNum, userId);
+            return { success: true, schedule: result.schedule, isNew: false };
+        }
+
+        const schedule = scheduleManager.createSchedule(serverNum, {
+            name: draft.name.trim(),
+            startTime: draft.startTime,
+            endTime: draft.endTime,
+            days: draft.days,
+            minimumPlayers: draft.minimumPlayers,
+            mapsPerVote: draft.mapsPerVote
+        });
+
+        if (!schedule) {
+            return { success: false, error: 'Failed to save new schedule. Please try again.' };
+        }
+
+        this.clearScheduleEditorDraft(serverNum, userId);
+        return { success: true, schedule, isNew: true };
+    }
+
     getDayOptions() {
         return [
             { label: 'Monday', value: 'mon', emoji: '1️⃣' },
@@ -200,35 +345,30 @@ class SchedulePanelService {
             'Configure time-based map pools with different settings for different times of day.\n\n' +
             '**How it works:**\n' +
             '• Each schedule defines a time range and one or more active days\n' +
-            '• Use the 7-day day picker for custom weekly schedules\n' +
-            '• Active schedule controls whitelist, settings, and automods\n' +
+            '• Edit schedule name, days, and time in one guided workflow\n' +
+            '• Active schedule controls whitelist, settings, and server rules\n' +
             '• Changes apply after current match ends'
         );
 
         embed.setFooter({ text: 'Seeding Bot • Schedule Manager' });
 
-        // Buttons Row 1 - Schedule management
+        // Buttons Row 1 - Primary actions
         const row1 = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
-                .setCustomId(`schedule_add_${serverNum}`)
-                .setLabel('Add Schedule')
-                .setEmoji('➕')
-                .setStyle(ButtonStyle.Success),
-            new ButtonBuilder()
-                .setCustomId(`schedule_edit_${serverNum}`)
-                .setLabel('Edit Schedule')
+                .setCustomId(`schedule_manage_${serverNum}`)
+                .setLabel('Edit/Create Schedule')
                 .setEmoji('✏️')
                 .setStyle(ButtonStyle.Primary),
             new ButtonBuilder()
-                .setCustomId(`schedule_edit_days_${serverNum}`)
-                .setLabel('Edit Days')
-                .setEmoji('📅')
+                .setCustomId(`schedule_maps_${serverNum}`)
+                .setLabel('Assign Map Pools')
+                .setEmoji('🗺️')
                 .setStyle(ButtonStyle.Primary)
                 .setDisabled(schedules.length === 0),
             new ButtonBuilder()
-                .setCustomId(`schedule_maps_${serverNum}`)
-                .setLabel('Manage Maps')
-                .setEmoji('🗺️')
+                .setCustomId(`schedule_rules_${serverNum}`)
+                .setLabel('Assign Server Rules')
+                .setEmoji('🤖')
                 .setStyle(ButtonStyle.Primary)
                 .setDisabled(schedules.length === 0),
             new ButtonBuilder()
@@ -239,7 +379,7 @@ class SchedulePanelService {
                 .setDisabled(schedules.length === 0)
         );
 
-        // Buttons Row 2 - General/Automod settings
+        // Buttons Row 2 - Schedule behavior
         const row2 = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
                 .setCustomId(`schedule_general_${serverNum}`)
@@ -254,20 +394,14 @@ class SchedulePanelService {
                 .setStyle(ButtonStyle.Secondary)
                 .setDisabled(schedules.length === 0),
             new ButtonBuilder()
-                .setCustomId(`schedule_automods_${serverNum}`)
-                .setLabel('Edit Automods')
-                .setEmoji('🤖')
-                .setStyle(ButtonStyle.Secondary)
-                .setDisabled(schedules.length === 0)
-        );
-
-        // Buttons Row 3 - Timezone/Override navigation
-        const row3 = new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
                 .setCustomId(`schedule_timezone_${serverNum}`)
                 .setLabel('Set Timezone')
                 .setEmoji('🌍')
-                .setStyle(ButtonStyle.Secondary),
+                .setStyle(ButtonStyle.Secondary)
+        );
+
+        // Buttons Row 3 - Override navigation
+        const row3 = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
                 .setCustomId(`schedule_override_${serverNum}`)
                 .setLabel('Override')
@@ -327,16 +461,59 @@ class SchedulePanelService {
         return { embeds: [embed], components: [selectRow, backRow] };
     }
 
+    buildScheduleEditorSelectPanel(serverNum) {
+        const schedules = scheduleManager.getSchedules(serverNum);
+
+        const embed = new EmbedBuilder()
+            .setTitle('✏️ Edit Or Create Schedule')
+            .setDescription(
+                'Select an existing schedule to edit it, or choose **Create New Schedule** at the bottom to start a new one.\n\n' +
+                'The editor keeps name, days, and time range in one guided workflow before saving.'
+            )
+            .setColor(0x3498DB);
+
+        const options = schedules.map(schedule => {
+            const display = scheduleManager.formatScheduleDisplay(schedule, serverNum);
+            return {
+                label: schedule.name.substring(0, 100),
+                description: `${display.timeRange} | ${display.days}`.substring(0, 100),
+                value: schedule.id
+            };
+        });
+
+        options.push({
+            label: 'Create New Schedule',
+            description: 'Start a brand new schedule workflow',
+            value: '__create_new_schedule__',
+            emoji: '➕'
+        });
+
+        const selectRow = new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+                .setCustomId(`schedule_select_manage_${serverNum}`)
+                .setPlaceholder('Select a schedule or create a new one...')
+                .addOptions(options)
+        );
+
+        const backRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`schedule_back_${serverNum}`)
+                .setLabel('Back')
+                .setEmoji('⬅️')
+                .setStyle(ButtonStyle.Secondary)
+        );
+
+        return { embeds: [embed], components: [selectRow, backRow] };
+    }
+
     /**
-     * Build schedule selection panel (for edit/delete)
+     * Build schedule selection panel (for delete/priority)
      */
     buildScheduleSelectPanel(serverNum, action) {
         const schedules = scheduleManager.getSchedules(serverNum);
 
         const actionLabels = {
-            edit: 'Edit',
             delete: 'Delete',
-            days: 'Edit Days',
             priority: 'Edit Priority'
         };
         const titleAction = actionLabels[action] || `${action.charAt(0).toUpperCase() + action.slice(1)}`;
@@ -391,8 +568,11 @@ class SchedulePanelService {
         const schedules = scheduleManager.getSchedules(serverNum);
 
         const embed = new EmbedBuilder()
-            .setTitle('🗺️ Select Schedule to Manage Maps')
-            .setDescription('Choose which schedule\'s map pool you want to configure.')
+            .setTitle('🗺️ Assign Map Pools')
+            .setDescription(
+                'Choose which schedule should use a custom map pool.\n\n' +
+                'Tip: schedules can either inherit all CRCON whitelist maps or use a custom per-schedule pool.'
+            )
             .setColor(0x2ECC71);
 
         if (schedules.length === 0) {
@@ -408,12 +588,13 @@ class SchedulePanelService {
         }
 
         const options = schedules.map(schedule => {
+            const display = scheduleManager.formatScheduleDisplay(schedule, serverNum);
             const whitelistInfo = schedule.whitelist === null
                 ? 'All Maps'
                 : `${schedule.whitelist.length} maps`;
             return {
                 label: schedule.name.substring(0, 100),
-                description: `${schedule.startTime}-${schedule.endTime} | ${whitelistInfo}`,
+                description: `${display.days} | ${whitelistInfo}`.substring(0, 100),
                 value: schedule.id
             };
         });
@@ -437,14 +618,17 @@ class SchedulePanelService {
     }
 
     /**
-     * Build schedule selection for automod editing
+     * Build schedule selection for server rules editing
      */
     buildScheduleAutomodSelectPanel(serverNum) {
         const schedules = scheduleManager.getSchedules(serverNum);
 
         const embed = new EmbedBuilder()
-            .setTitle('🤖 Select Schedule for Automods')
-            .setDescription('Choose which schedule should have automod settings edited.')
+            .setTitle('🤖 Assign Server Rules')
+            .setDescription(
+                'Choose which schedule should override server rules.\n\n' +
+                'These rules apply only while that schedule is active and otherwise inherit the server defaults.'
+            )
             .setColor(0x5865F2);
 
         if (schedules.length === 0) {
@@ -461,13 +645,13 @@ class SchedulePanelService {
 
         const options = schedules.map(schedule => ({
             label: schedule.name.substring(0, 100),
-            description: `${schedule.startTime}-${schedule.endTime}`.substring(0, 100),
+            description: `${this.formatSelectedDays(schedule.days)} | ${schedule.startTime}-${schedule.endTime}`.substring(0, 100),
             value: schedule.id
         }));
 
         const selectRow = new ActionRowBuilder().addComponents(
             new StringSelectMenuBuilder()
-                .setCustomId(`schedule_select_automods_${serverNum}`)
+                .setCustomId(`schedule_select_rules_${serverNum}`)
                 .setPlaceholder('Select a schedule...')
                 .addOptions(options)
         );
@@ -981,6 +1165,175 @@ class SchedulePanelService {
         );
 
         return { embeds: [embed], components: [row, backRow] };
+    }
+
+    buildScheduleEditorPanel(serverNum, userId) {
+        const draft = this.getScheduleEditorDraft(serverNum, userId);
+        if (!draft) {
+            return {
+                content: 'No schedule editor session found.',
+                flags: 64
+            };
+        }
+
+        const selectedDays = Array.isArray(draft.days) && draft.days.length > 0
+            ? draft.days
+            : scheduleManager.getDayPresets().all;
+        const selectedDaysSet = new Set(selectedDays);
+        const dayOptions = this.getDayOptions().map(option => ({
+            label: option.label,
+            value: option.value,
+            emoji: option.emoji,
+            default: selectedDaysSet.has(option.value)
+        }));
+        const daysLabel = this.formatSelectedDays(selectedDays);
+
+        const embed = new EmbedBuilder()
+            .setTitle(draft.isNew ? '➕ Create Schedule' : `✏️ Edit Schedule - ${draft.name}`)
+            .setDescription(
+                'Finish the full schedule setup here, then save once when it looks right.\n\n' +
+                `**Name:** ${draft.name}\n` +
+                `**Days:** ${daysLabel}\n` +
+                `**Time Range:** ${draft.startTime} - ${draft.endTime}\n` +
+                `**Minimum Players:** ${draft.minimumPlayers}\n` +
+                `**Maps Per Vote:** ${draft.mapsPerVote}`
+            )
+            .setColor(0x3498DB);
+
+        const editRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`schedule_editor_name_${serverNum}`)
+                .setLabel('Edit Name')
+                .setEmoji('📝')
+                .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+                .setCustomId(`schedule_editor_time_${serverNum}`)
+                .setLabel('Edit Time')
+                .setEmoji('⏰')
+                .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+                .setCustomId(`schedule_editor_settings_${serverNum}`)
+                .setLabel('Edit Vote Settings')
+                .setEmoji('🎛️')
+                .setStyle(ButtonStyle.Secondary)
+        );
+
+        const presetRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`schedule_editor_days_all_${serverNum}`)
+                .setLabel('All Days')
+                .setStyle(selectedDays.length === 7 ? ButtonStyle.Primary : ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId(`schedule_editor_days_weekdays_${serverNum}`)
+                .setLabel('Weekdays')
+                .setStyle(daysLabel === 'Weekdays' ? ButtonStyle.Primary : ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId(`schedule_editor_days_weekend_${serverNum}`)
+                .setLabel('Weekend')
+                .setStyle(daysLabel === 'Weekend' ? ButtonStyle.Primary : ButtonStyle.Secondary)
+        );
+
+        const daySelectRow = new ActionRowBuilder().addComponents(
+            new StringSelectMenuBuilder()
+                .setCustomId(`schedule_editor_days_select_${serverNum}`)
+                .setPlaceholder('Select one or more days...')
+                .setMinValues(1)
+                .setMaxValues(dayOptions.length)
+                .addOptions(dayOptions)
+        );
+
+        const actionRow = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId(`schedule_editor_save_${serverNum}`)
+                .setLabel(draft.isNew ? 'Create Schedule' : 'Save Changes')
+                .setEmoji('💾')
+                .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+                .setCustomId(`schedule_editor_cancel_${serverNum}`)
+                .setLabel('Cancel')
+                .setEmoji('⬅️')
+                .setStyle(ButtonStyle.Secondary)
+        );
+
+        return { embeds: [embed], components: [editRow, presetRow, daySelectRow, actionRow] };
+    }
+
+    buildScheduleEditorNameModal(serverNum, draft) {
+        const modal = new ModalBuilder()
+            .setCustomId(`schedule_editor_name_modal_${serverNum}`)
+            .setTitle(draft.isNew ? 'Create Schedule Name' : 'Edit Schedule Name');
+
+        const nameInput = new TextInputBuilder()
+            .setCustomId('schedule_name')
+            .setLabel('Schedule Name')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('e.g., Prime Time, Seeding Hours')
+            .setValue(draft.name || '')
+            .setRequired(true)
+            .setMaxLength(50);
+
+        modal.addComponents(new ActionRowBuilder().addComponents(nameInput));
+        return modal;
+    }
+
+    buildScheduleEditorTimeModal(serverNum, draft) {
+        const modal = new ModalBuilder()
+            .setCustomId(`schedule_editor_time_modal_${serverNum}`)
+            .setTitle(draft.isNew ? 'Create Schedule Time' : 'Edit Schedule Time');
+
+        const startTimeInput = new TextInputBuilder()
+            .setCustomId('schedule_start')
+            .setLabel('Start Time (24h format)')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('e.g., 18:00')
+            .setValue(draft.startTime || '18:00')
+            .setRequired(true)
+            .setMaxLength(5);
+
+        const endTimeInput = new TextInputBuilder()
+            .setCustomId('schedule_end')
+            .setLabel('End Time (24h format)')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('e.g., 23:00')
+            .setValue(draft.endTime || '23:00')
+            .setRequired(true)
+            .setMaxLength(5);
+
+        modal.addComponents(
+            new ActionRowBuilder().addComponents(startTimeInput),
+            new ActionRowBuilder().addComponents(endTimeInput)
+        );
+        return modal;
+    }
+
+    buildScheduleEditorSettingsModal(serverNum, draft) {
+        const modal = new ModalBuilder()
+            .setCustomId(`schedule_editor_settings_modal_${serverNum}`)
+            .setTitle(draft.isNew ? 'Create Vote Settings' : 'Edit Vote Settings');
+
+        const minPlayersInput = new TextInputBuilder()
+            .setCustomId('schedule_min_players')
+            .setLabel('Minimum Players to Activate')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('e.g., 40')
+            .setValue(String(draft.minimumPlayers ?? 40))
+            .setRequired(true)
+            .setMaxLength(3);
+
+        const mapsPerVoteInput = new TextInputBuilder()
+            .setCustomId('schedule_maps_per_vote')
+            .setLabel('Maps Per Vote')
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder('e.g., 6')
+            .setValue(String(draft.mapsPerVote ?? 6))
+            .setRequired(true)
+            .setMaxLength(2);
+
+        modal.addComponents(
+            new ActionRowBuilder().addComponents(minPlayersInput),
+            new ActionRowBuilder().addComponents(mapsPerVoteInput)
+        );
+        return modal;
     }
 
     /**
