@@ -97,6 +97,7 @@ class MapVotingService {
         this.pendingMatchStartDetection = false;
         this.voteFinalizationInProgress = false;
         this.skipNextUnseededMatchEndRotation = false;
+        this.queuedNextMapId = null;
     }
 
     // ==================== INITIALIZATION ====================
@@ -696,6 +697,23 @@ class MapVotingService {
                     return this.gameActive;
                 }
 
+                if (this.queuedNextMapId) {
+                    if (currentMapId === this.queuedNextMapId) {
+                        logger.info(
+                            `[MapVoting S${this.serverNum}] Observed queued next map live: ${currentMapId}`
+                        );
+                        this.queuedNextMapId = null;
+                    } else if (this.lastObservedMatchMapId && currentMapId === this.lastObservedMatchMapId) {
+                        this.gameActive = false;
+                        return this.gameActive;
+                    } else {
+                        logger.warn(
+                            `[MapVoting S${this.serverNum}] Observed unexpected map transition to ${currentMapId} while waiting for queued next map ${this.queuedNextMapId}; clearing pending transition`
+                        );
+                        this.queuedNextMapId = null;
+                    }
+                }
+
                 if (!this.lastObservedMatchMapId) {
                     this.lastObservedMatchMapId = currentMapId;
                     this.gameActive = true;
@@ -1061,6 +1079,7 @@ class MapVotingService {
             }
 
             await this.crcon.post('set_map_rotation', { map_names: [selectedMap.id] });
+            this.queuedNextMapId = selectedMap.id;
             logger.info(`[MapVoting S${this.serverNum}] Applied non-seeded rotation map: ${selectedMap.id}`);
             return true;
         } catch (error) {
@@ -1184,6 +1203,7 @@ class MapVotingService {
 
                 logger.info(`[MapVoting S${this.serverNum}] Setting next map: ${mapId}`);
                 await this.crcon.post('set_map_rotation', { map_names: [mapId] });
+                this.queuedNextMapId = mapId;
             } else {
                 logger.warn(`[MapVoting S${this.serverNum}] Could not determine next map`);
             }
@@ -1503,6 +1523,7 @@ class MapVotingService {
         this.sendSeedingMessage = true;
         this.seeded = false;
         this.skipNextUnseededMatchEndRotation = false;
+        this.queuedNextMapId = null;
     }
 
     getStatus() {

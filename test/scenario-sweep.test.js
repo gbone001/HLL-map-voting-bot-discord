@@ -167,3 +167,74 @@ test('scenario sweep: stale stored vote is cleaned up when the Discord poll mess
         voteStore.deleteVote(gameStart, serverNum);
     }
 });
+
+test('scenario sweep: queued next map blocks a new vote until the live map actually rotates', async () => {
+    const service = createPollingService();
+    let startVoteCalls = 0;
+    const snapshots = [
+        {
+            currentMapId: 'hill400_warfare',
+            currentPlayers: 97,
+            gameActive: true,
+            matchStartEpochSeconds: 5000
+        },
+        {
+            currentMapId: 'hill400_warfare',
+            currentPlayers: 97,
+            gameActive: true,
+            matchStartEpochSeconds: 5000
+        },
+        {
+            currentMapId: 'carentan_warfare',
+            currentPlayers: 97,
+            gameActive: true,
+            matchStartEpochSeconds: 6000
+        },
+        {
+            currentMapId: 'carentan_warfare',
+            currentPlayers: 97,
+            gameActive: true,
+            matchStartEpochSeconds: 6000
+        }
+    ];
+
+    service.queuedNextMapId = 'carentan_warfare';
+    service.lastObservedMatchMapId = 'hill400_warfare';
+    service.crcon = {
+        getMatchSnapshot: async () => snapshots.shift(),
+        getStatus: async () => ({
+            result: {
+                current_players: 97,
+                current_map: {
+                    id: 'carentan_warfare',
+                    pretty_name: 'Carentan Warfare'
+                }
+            }
+        })
+    };
+    service.checkActiveVote = async () => false;
+    service.startVote = async () => {
+        startVoteCalls += 1;
+        service.voteActive = true;
+    };
+
+    await service.doMapVote();
+    assert.equal(startVoteCalls, 0);
+    assert.equal(service.gameActive, false);
+    assert.equal(service.queuedNextMapId, 'carentan_warfare');
+
+    await service.doMapVote();
+    assert.equal(startVoteCalls, 0);
+    assert.equal(service.gameActive, false);
+    assert.equal(service.queuedNextMapId, 'carentan_warfare');
+
+    await service.doMapVote();
+    assert.equal(startVoteCalls, 0);
+    assert.equal(service.gameActive, false);
+    assert.equal(service.queuedNextMapId, null);
+
+    await service.doMapVote();
+    assert.equal(startVoteCalls, 1);
+    assert.equal(service.gameActive, true);
+    assert.equal(service.queuedNextMapId, null);
+});
