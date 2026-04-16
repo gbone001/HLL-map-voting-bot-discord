@@ -1299,7 +1299,18 @@ class MapVotingService {
             }
 
             if (this.voteMessage && this.voteMessage.poll) {
-                await this.voteMessage.poll.end();
+                try {
+                    await this.voteMessage.poll.end();
+                } catch (error) {
+                    const message = error?.message || '';
+                    if (!message.includes('already expired')) {
+                        throw error;
+                    }
+
+                    logger.warn(
+                        `[MapVoting S${this.serverNum}] Poll already expired before finalization; continuing with vote result processing`
+                    );
+                }
             }
             const finalizedMapId = await this.setVoteResult();
 

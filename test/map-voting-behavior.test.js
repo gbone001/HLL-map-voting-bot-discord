@@ -289,6 +289,45 @@ test('duplicate vote finalization claims do not overwrite the first selected map
     }
 });
 
+test('stopVote still finalizes the next map when the Discord poll has already expired', async () => {
+    const gameStart = Date.now() + Math.floor(Math.random() * 100000);
+    const serverNum = 1;
+    const messageId = `vote-${gameStart}`;
+    let setVoteResultCalls = 0;
+
+    voteStore.deleteVote(gameStart, serverNum);
+    voteStore.setVote(messageId, gameStart, serverNum, [
+        { id: 'stmariedumont_warfare', pretty_name: 'St. Marie Du Mont Warfare' }
+    ]);
+
+    const service = new MapVotingService(serverNum);
+    service.gameStart = gameStart;
+    service.voteMessageId = messageId;
+    service.voteActive = true;
+    service.voteMessage = {
+        poll: {
+            end: async () => {
+                throw new Error('This poll has already expired.');
+            }
+        }
+    };
+    service.setVoteResult = async () => {
+        setVoteResultCalls += 1;
+        return 'stmariedumont_warfare';
+    };
+
+    try {
+        const finalizedMapId = await service.stopVote();
+
+        assert.equal(finalizedMapId, 'stmariedumont_warfare');
+        assert.equal(setVoteResultCalls, 1);
+        assert.equal(service.voteActive, false);
+        assert.equal(voteStore.getVote(gameStart, serverNum), null);
+    } finally {
+        voteStore.deleteVote(gameStart, serverNum);
+    }
+});
+
 test('vote finalization random fallback uses live poll options instead of stale in-memory maps', async () => {
     const originalRandom = Math.random;
     const service = new MapVotingService(1);
