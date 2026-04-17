@@ -2,6 +2,15 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { MapVotingService } = require('../src/services/mapVoting');
 const { CRCONService, TRANSPORT_MODES } = require('../src/services/crcon');
+const queuedMapStore = require('../src/services/queuedMapStore');
+
+test.beforeEach(() => {
+    queuedMapStore.clearQueuedMap(1);
+});
+
+test.afterEach(() => {
+    queuedMapStore.clearQueuedMap(1);
+});
 
 function buildPollMessage(answerTexts) {
     return {
@@ -82,6 +91,13 @@ test('vote finalization in direct RCON mode moves an existing winner into the sl
     });
 
     const commands = [];
+    const liveState = {
+        currentMapId: 'foy_warfare',
+        nextMapId: 'kharkov_warfare',
+        currentPlayers: 85,
+        gameActive: true,
+        matchStartEpochSeconds: 7000
+    };
     crcon.hasDirectRconConfigured = () => true;
     crcon.executeDirectCommand = async (command, payload, endpoint) => {
         commands.push({ command, payload, endpoint });
@@ -102,8 +118,13 @@ test('vote finalization in direct RCON mode moves an existing winner into the sl
             };
         }
 
+        if (command === 'MoveMapInSequence') {
+            liveState.nextMapId = 'stmereeglise_warfare';
+        }
+
         return { result: { ok: true } };
     };
+    crcon.getMatchSnapshot = async () => ({ ...liveState });
 
     const service = buildVotingService(crcon);
 
@@ -134,6 +155,13 @@ test('vote finalization in direct RCON mode adds a missing winner into the slot 
     });
 
     const commands = [];
+    const liveState = {
+        currentMapId: 'foy_warfare',
+        nextMapId: 'kharkov_warfare',
+        currentPlayers: 85,
+        gameActive: true,
+        matchStartEpochSeconds: 7100
+    };
     crcon.hasDirectRconConfigured = () => true;
     crcon.executeDirectCommand = async (command, payload, endpoint) => {
         commands.push({ command, payload, endpoint });
@@ -152,8 +180,13 @@ test('vote finalization in direct RCON mode adds a missing winner into the slot 
             };
         }
 
+        if (command === 'AddMapToSequence') {
+            liveState.nextMapId = 'stmariedumont_warfare';
+        }
+
         return { result: { ok: true } };
     };
+    crcon.getMatchSnapshot = async () => ({ ...liveState });
 
     const service = buildVotingService(crcon);
     service.getResults = async () => [
@@ -190,6 +223,13 @@ test('vote finalization in fallback mode sends the voted winner through direct R
     });
 
     const commands = [];
+    const liveState = {
+        currentMapId: 'foy_warfare',
+        nextMapId: 'foy_warfare',
+        currentPlayers: 85,
+        gameActive: true,
+        matchStartEpochSeconds: 7200
+    };
     crcon.client = {
         get: async (url) => {
             if (url === '/api/get_map_rotation') {
@@ -219,6 +259,7 @@ test('vote finalization in fallback mode sends the voted winner through direct R
         }
     };
     crcon.hasDirectRconConfigured = () => true;
+    crcon.getPublicInfoState = async () => ({ ...liveState });
     crcon.executeDirectCommand = async (command, payload, endpoint) => {
         commands.push({ command, payload, endpoint });
 
@@ -234,6 +275,10 @@ test('vote finalization in fallback mode sends the voted winner through direct R
                     ]
                 }
             };
+        }
+
+        if (command === 'AddMapToSequence') {
+            liveState.nextMapId = 'stmereeglise_warfare';
         }
 
         return { result: { ok: true } };

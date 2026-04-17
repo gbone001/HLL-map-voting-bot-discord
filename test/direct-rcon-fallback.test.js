@@ -203,6 +203,56 @@ test('match snapshot keeps unknown current maps active using normalized fallback
     assert.ok(snapshot.matchStartEpochSeconds);
 });
 
+test('direct match snapshot derives nextMapId from the live sequence state', async () => {
+    const service = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.DIRECT_RCON,
+        rconHost: '127.0.0.1',
+        rconPort: 27015,
+        rconPassword: 'secret'
+    });
+
+    service.hasDirectRconConfigured = () => true;
+    service.executeDirectCommand = async (command, payload) => {
+        if (command !== 'GetServerInformation') {
+            throw new Error(`Unexpected command ${command}`);
+        }
+
+        if (payload?.Name === 'session') {
+            return {
+                result: {
+                    playerCount: 95,
+                    MapName: 'Omaha Beach',
+                    CurrentMapName: 'Omaha Beach'
+                }
+            };
+        }
+
+        if (payload?.Name === 'mapsequence') {
+            return {
+                result: {
+                    currentIndex: 10,
+                    MapSequence: [
+                        { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 0 },
+                        { MapName: 'Foy', MapId: 'foy_warfare', position: 9 },
+                        { MapName: 'Omaha Beach', MapId: 'omahabeach_warfare', position: 10 },
+                        { MapName: 'St. Marie Du Mont', MapId: 'stmariedumont_warfare', position: 11 }
+                    ]
+                }
+            };
+        }
+
+        throw new Error(`Unexpected GetServerInformation payload ${JSON.stringify(payload)}`);
+    };
+
+    const snapshot = await service.getMatchSnapshot();
+
+    assert.equal(snapshot.currentMapId, 'omahabeach_warfare');
+    assert.equal(snapshot.nextMapId, 'stmariedumont_warfare');
+    assert.equal(snapshot.currentPlayers, 95);
+    assert.equal(snapshot.gameActive, true);
+});
+
 test('match snapshot prefers live public info when it disagrees with get_status', async () => {
     const service = new CRCONService({
         serverName: 'Test Server',

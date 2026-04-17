@@ -3,6 +3,15 @@ const assert = require('node:assert/strict');
 const { MapVotingService } = require('../src/services/mapVoting');
 const voteStore = require('../src/services/voteStore');
 const configManager = require('../src/services/configManager');
+const queuedMapStore = require('../src/services/queuedMapStore');
+
+test.beforeEach(() => {
+    queuedMapStore.clearQueuedMap(1);
+});
+
+test.afterEach(() => {
+    queuedMapStore.clearQueuedMap(1);
+});
 
 test('non-seeded rotation still applies on match end when voting is disabled', async () => {
     const service = new MapVotingService(1);
@@ -351,10 +360,18 @@ test('vote finalization random fallback uses live poll options instead of stale 
             })
         }
     };
-    service.crcon = {
-        queueNextMap: async (mapId) => {
-            selectedRotationMap = mapId;
-        }
+    service.ensureDesiredNextMap = async (mapId) => {
+        selectedRotationMap = mapId;
+        service.queuedNextMapId = mapId;
+        return {
+            queued: true,
+            consumed: false,
+            liveState: {
+                currentMapId: 'foy_warfare',
+                nextMapId: mapId,
+                matchStartEpochSeconds: 5000
+            }
+        };
     };
     service.getAllMaps = async () => ([
         { id: 'stmariedumont_warfare', pretty_name: 'St. Marie Du Mont Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'St. Marie Du Mont' } },
@@ -399,10 +416,18 @@ test('non-seeded rotation falls back to available maps when no non-seeded list i
     service.getEffectiveWhitelist = async () => null;
     service.getRecentExcludedMapIds = async () => new Set(['omahabeach_warfare']);
     service.getCurrentMapId = async () => 'omahabeach_warfare';
-    service.crcon = {
-        queueNextMap: async (mapId) => {
-            selectedRotationMap = mapId;
-        }
+    service.ensureDesiredNextMap = async (mapId) => {
+        selectedRotationMap = mapId;
+        service.queuedNextMapId = mapId;
+        return {
+            queued: true,
+            consumed: false,
+            liveState: {
+                currentMapId: 'omahabeach_warfare',
+                nextMapId: mapId,
+                matchStartEpochSeconds: 5000
+            }
+        };
     };
 
     try {
@@ -435,10 +460,18 @@ test('non-seeded rotation avoids re-selecting the current map when alternatives 
     ]);
     service.getRecentExcludedMapIds = async () => new Set(['omahabeach_warfare', 'utahbeach_warfare']);
     service.getCurrentMapId = async () => 'omahabeach_warfare';
-    service.crcon = {
-        queueNextMap: async (mapId) => {
-            selectedRotationMap = mapId;
-        }
+    service.ensureDesiredNextMap = async (mapId) => {
+        selectedRotationMap = mapId;
+        service.queuedNextMapId = mapId;
+        return {
+            queued: true,
+            consumed: false,
+            liveState: {
+                currentMapId: 'omahabeach_warfare',
+                nextMapId: mapId,
+                matchStartEpochSeconds: 5000
+            }
+        };
     };
 
     try {

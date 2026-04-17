@@ -3,6 +3,15 @@ const assert = require('node:assert/strict');
 
 const { MapVotingService } = require('../src/services/mapVoting');
 const voteStore = require('../src/services/voteStore');
+const queuedMapStore = require('../src/services/queuedMapStore');
+
+test.beforeEach(() => {
+    queuedMapStore.clearQueuedMap(1);
+});
+
+test.afterEach(() => {
+    queuedMapStore.clearQueuedMap(1);
+});
 
 function createPollingService() {
     const service = new MapVotingService(1);
@@ -174,30 +183,40 @@ test('scenario sweep: queued next map blocks a new vote until the live map actua
     const snapshots = [
         {
             currentMapId: 'hill400_warfare',
+            nextMapId: 'carentan_warfare',
             currentPlayers: 97,
             gameActive: true,
             matchStartEpochSeconds: 5000
         },
         {
             currentMapId: 'hill400_warfare',
+            nextMapId: 'carentan_warfare',
             currentPlayers: 97,
             gameActive: true,
             matchStartEpochSeconds: 5000
         },
         {
             currentMapId: 'carentan_warfare',
+            nextMapId: 'foy_warfare',
             currentPlayers: 97,
             gameActive: true,
             matchStartEpochSeconds: 6000
         },
         {
             currentMapId: 'carentan_warfare',
+            nextMapId: 'foy_warfare',
             currentPlayers: 97,
             gameActive: true,
             matchStartEpochSeconds: 6000
         }
     ];
 
+    queuedMapStore.upsertQueuedMap(1, {
+        desiredMapId: 'carentan_warfare',
+        source: 'seeded-vote',
+        gameStart: 5000,
+        voteMessageId: 'queued-vote-message'
+    });
     service.queuedNextMapId = 'carentan_warfare';
     service.lastObservedMatchMapId = 'hill400_warfare';
     service.crcon = {

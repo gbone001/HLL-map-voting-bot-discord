@@ -505,6 +505,39 @@ class CRCONService {
         };
     }
 
+    async getDirectSequenceState() {
+        const response = await this.executeDirectCommand(
+            'GetServerInformation',
+            { Name: 'mapsequence', Value: '' },
+            'get_map_rotation'
+        );
+
+        return this.normalizeDirectSequenceState(response.result);
+    }
+
+    getDirectSequenceNextMapId(sequenceState, currentMapId = null) {
+        if (!sequenceState || !Array.isArray(sequenceState.entries) || sequenceState.entries.length === 0) {
+            return null;
+        }
+
+        let currentIndex = Number.isInteger(sequenceState.currentIndex)
+            ? sequenceState.currentIndex
+            : 0;
+
+        if (currentMapId) {
+            const matchingEntry = sequenceState.entries.find((entry) => entry.id === currentMapId);
+            if (matchingEntry && Number.isInteger(matchingEntry.sequencePosition)) {
+                currentIndex = matchingEntry.sequencePosition;
+            }
+        }
+
+        const nextIndex = this.getDirectNextSequencePosition(sequenceState.entries, currentIndex);
+        const nextEntry = sequenceState.entries.find((entry) => entry.sequencePosition === nextIndex)
+            || null;
+
+        return nextEntry?.id || null;
+    }
+
     async removeDirectMapFromRotation(mapName) {
         const rotation = await this.getDirectMapRotation();
         const mapIds = (rotation.result || []).map((entry) => entry.id);
@@ -527,12 +560,7 @@ class CRCONService {
             throw new Error('set_map_rotation requires at least one map name');
         }
 
-        const sequenceResponse = await this.executeDirectCommand(
-            'GetServerInformation',
-            { Name: 'mapsequence', Value: '' },
-            'get_map_rotation'
-        );
-        const sequenceState = this.normalizeDirectSequenceState(sequenceResponse.result);
+        const sequenceState = await this.getDirectSequenceState();
         const sequence = sequenceState.entries;
 
         if (sequence.length === 0) {
@@ -552,11 +580,7 @@ class CRCONService {
         const currentIndex = Number.isInteger(sequenceState.currentIndex)
             ? sequenceState.currentIndex
             : 0;
-        const maxPosition = sequence.reduce(
-            (highestPosition, entry) => Math.max(highestPosition, entry.sequencePosition),
-            0
-        );
-        const nextIndex = currentIndex >= maxPosition ? 0 : currentIndex + 1;
+        const nextIndex = this.getDirectNextSequencePosition(sequence, currentIndex);
         const existingIndex = this.findPreferredSequenceIndex(sequence, mapId, currentIndex);
 
         if (existingIndex === nextIndex) {
@@ -990,6 +1014,18 @@ class CRCONService {
             status?.result?.raw?.map
         ]);
         const currentMapId = publicInfoState?.currentMapId || statusCurrentMapId || null;
+        let directNextMapId = null;
+
+        if (!publicInfoState?.nextMapId && this.hasDirectRconConfigured()) {
+            try {
+                const directSequenceState = await this.getDirectSequenceState();
+                directNextMapId = this.getDirectSequenceNextMapId(directSequenceState, currentMapId);
+            } catch (error) {
+                logger.warn(
+                    `[CRCON ${this.serverName}] Direct sequence read failed during match snapshot: ${error.message}`
+                );
+            }
+        }
 
         if (currentMapId) {
             this.updateLocalMatchState(currentMapId, publicInfoState?.matchStartEpochSeconds ?? null);
@@ -997,6 +1033,7 @@ class CRCONService {
 
         return {
             currentMapId,
+            nextMapId: publicInfoState?.nextMapId || directNextMapId || null,
             currentPlayers: status?.result?.current_players ?? publicInfoState?.currentPlayers ?? 0,
             gameActive: publicInfoState?.gameActive ?? Boolean(status?.result?.map || status?.result?.current_map),
             matchStartEpochSeconds: this.matchStartEpochMs
@@ -1193,6 +1230,23 @@ class CRCONService {
         }
 
         return currentIndex >= entryCount - 1 ? 0 : currentIndex + 1;
+    }
+
+    getDirectNextSequencePosition(entries, currentIndex) {
+        if (!Array.isArray(entries) || entries.length === 0) {
+            return 0;
+        }
+
+        const maxPosition = entries.reduce(
+            (highestPosition, entry) => Math.max(highestPosition, entry.sequencePosition),
+            0
+        );
+
+        if (!Number.isInteger(currentIndex) || currentIndex < 0) {
+            return entries[0]?.sequencePosition ?? 0;
+        }
+
+        return currentIndex >= maxPosition ? 0 : currentIndex + 1;
     }
 
     buildRotationWithQueuedNextMap(entries, nextIndex, mapId) {

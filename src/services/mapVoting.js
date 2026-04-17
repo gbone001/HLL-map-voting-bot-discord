@@ -10,6 +10,11 @@ const scheduleManager = require('./scheduleManager');
 const automodPresetManager = require('./automodPresetManager');
 const voteStore = require('./voteStore');
 const configManager = require('./configManager');
+const queuedMapStore = require('./queuedMapStore');
+
+const QUEUED_MAP_REAPPLY_COOLDOWN_MS = 30000;
+const QUEUED_MAP_VERIFY_RETRIES = 3;
+const QUEUED_MAP_VERIFY_RETRY_DELAY_MS = 1000;
 
 class MapVotingService {
     constructor(serverNum = 1) {
@@ -97,6 +102,7 @@ class MapVotingService {
         this.lastStatusFailureLogAt = 0;
         this.lastServerStatus = null;
         this.lastObservedMatchMapId = null;
+        this.lastObservedMatchStartEpochSeconds = null;
         this.pendingMatchStartDetection = false;
         this.voteFinalizationInProgress = false;
         this.skipNextUnseededMatchEndRotation = false;
@@ -165,12 +171,21 @@ class MapVotingService {
 
             // Clean up old votes on startup
             voteStore.cleanup();
+            queuedMapStore.cleanup();
 
             // Restore service state from last run
             const savedState = voteStore.getState(`voteMapActive_${this.serverNum}`);
             if (savedState !== null) {
                 this.voteMapActive = savedState;
                 logger.info(`[MapVoting S${this.serverNum}] Restored state: ${this.voteMapActive ? 'active' : 'paused'}`);
+            }
+
+            const pendingQueuedMap = queuedMapStore.getQueuedMap(this.serverNum);
+            if (pendingQueuedMap?.desiredMapId) {
+                this.queuedNextMapId = pendingQueuedMap.desiredMapId;
+                logger.info(
+                    `[MapVoting S${this.serverNum}] Restored pending queued map: ${pendingQueuedMap.desiredMapId} (${pendingQueuedMap.source})`
+                );
             }
 
             this.startPolling();
@@ -728,6 +743,250 @@ class MapVotingService {
         }
     }
 
+    sleep(milliseconds) {
+        return new Promise((resolve) => setTimeout(resolve, milliseconds));
+    }
+
+    getPendingQueuedMap() {
+        const pendingEntry = queuedMapStore.getQueuedMap(this.serverNum);
+        this.queuedNextMapId = pendingEntry?.desiredMapId || null;
+        return pendingEntry;
+    }
+
+    async readLiveQueuedMapState() {
+        const publicInfoState = typeof this.crcon?.getPublicInfoState === 'function'
+            ? await this.crcon.getPublicInfoState()
+            : null;
+
+        if (publicInfoState) {
+            return publicInfoState;
+        }
+
+        if (typeof this.crcon?.getMatchSnapshot === 'function') {
+            const snapshot = await this.crcon.getMatchSnapshot();
+            return {
+                currentMapId: snapshot?.currentMapId || null,
+                nextMapId: snapshot?.nextMapId || null,
+                currentPlayers: snapshot?.currentPlayers ?? null,
+                gameActive: snapshot?.gameActive ?? null,
+                matchStartEpochSeconds: snapshot?.matchStartEpochSeconds ?? null
+            };
+        }
+
+        return {
+            currentMapId: null,
+            nextMapId: null,
+            currentPlayers: null,
+            gameActive: null,
+            matchStartEpochSeconds: null
+        };
+    }
+
+    async ensureDesiredNextMap(mapId, source, options = {}) {
+        const pendingEntry = queuedMapStore.upsertQueuedMap(this.serverNum, {
+            desiredMapId: mapId,
+            source,
+            gameStart: options.gameStart ?? this.gameStart ?? null,
+            voteMessageId: options.voteMessageId ?? this.voteMessageId ?? null
+        });
+        this.queuedNextMapId = mapId;
+
+        let latestLiveState = null;
+        let lastError = null;
+
+        for (let attempt = 1; attempt <= QUEUED_MAP_VERIFY_RETRIES; attempt += 1) {
+            try {
+                await this.crcon.queueNextMap(mapId);
+                latestLiveState = await this.readLiveQueuedMapState();
+
+                queuedMapStore.noteEnforcement(this.serverNum, {
+                    currentMapId: latestLiveState?.currentMapId ?? null,
+                    nextMapId: latestLiveState?.nextMapId ?? null,
+                    incrementReapplyCount: attempt > 1
+                });
+
+                if (latestLiveState?.currentMapId === mapId) {
+                    queuedMapStore.markQueuedMapConsumed(this.serverNum, {
+                        actualMapId: mapId,
+                        currentMapId: mapId,
+                        nextMapId: latestLiveState?.nextMapId ?? null
+                    });
+                    this.queuedNextMapId = null;
+                    return {
+                        queued: true,
+                        consumed: true,
+                        liveState: latestLiveState
+                    };
+                }
+
+                if (latestLiveState?.nextMapId === mapId) {
+                    queuedMapStore.markQueuedMapVerified(this.serverNum, {
+                        currentMapId: latestLiveState?.currentMapId ?? null,
+                        nextMapId: mapId
+                    });
+                    return {
+                        queued: true,
+                        consumed: false,
+                        liveState: latestLiveState
+                    };
+                }
+
+                lastError = new Error(
+                    `expected next map ${mapId} but live next map is ${latestLiveState?.nextMapId || 'unknown'}`
+                );
+            } catch (error) {
+                lastError = error;
+                queuedMapStore.noteEnforcement(this.serverNum, {
+                    currentMapId: latestLiveState?.currentMapId ?? null,
+                    nextMapId: latestLiveState?.nextMapId ?? null,
+                    lastError: error.message,
+                    incrementReapplyCount: attempt > 1
+                });
+            }
+
+            if (attempt < QUEUED_MAP_VERIFY_RETRIES) {
+                await this.sleep(QUEUED_MAP_VERIFY_RETRY_DELAY_MS * attempt);
+            }
+        }
+
+        queuedMapStore.updateQueuedMap(this.serverNum, (entry) => ({
+            ...entry,
+            lastError: lastError?.message || 'unknown queue verification failure'
+        }));
+
+        throw lastError || new Error(`Failed to verify queued next map ${mapId}`);
+    }
+
+    async reapplyPendingQueuedMap(pendingEntry, reason, liveState = null) {
+        if (!pendingEntry?.desiredMapId) {
+            return false;
+        }
+
+        const now = Date.now();
+        if (pendingEntry.lastEnforcedAt && now - pendingEntry.lastEnforcedAt < QUEUED_MAP_REAPPLY_COOLDOWN_MS) {
+            return false;
+        }
+
+        logger.warn(
+            `[MapVoting S${this.serverNum}] Reapplying queued map ${pendingEntry.desiredMapId} because ${reason}`
+        );
+
+        try {
+            await this.ensureDesiredNextMap(pendingEntry.desiredMapId, pendingEntry.source, {
+                gameStart: pendingEntry.gameStart ?? null,
+                voteMessageId: pendingEntry.voteMessageId ?? null
+            });
+            return true;
+        } catch (error) {
+            logger.error(
+                `[MapVoting S${this.serverNum}] Failed to reapply queued map ${pendingEntry.desiredMapId}: ${error.message}`
+            );
+            queuedMapStore.updateQueuedMap(this.serverNum, (entry) => ({
+                ...entry,
+                lastObservedCurrentMapId: liveState?.currentMapId ?? entry.lastObservedCurrentMapId ?? null,
+                lastObservedNextMapId: liveState?.nextMapId ?? entry.lastObservedNextMapId ?? null,
+                lastError: error.message
+            }));
+            return false;
+        }
+    }
+
+    async reconcilePendingQueuedMap(snapshot) {
+        const pendingEntry = this.getPendingQueuedMap();
+        if (!pendingEntry?.desiredMapId) {
+            return {
+                pendingEntry: null,
+                awaitingQueuedTransition: false,
+                consumed: false,
+                failed: false
+            };
+        }
+
+        const desiredMapId = pendingEntry.desiredMapId;
+        const currentMapId = snapshot?.currentMapId || null;
+        const nextMapId = snapshot?.nextMapId || null;
+        const currentMatchStartEpochSeconds = snapshot?.matchStartEpochSeconds ?? null;
+        const sourceMatchStartEpochSeconds = pendingEntry.gameStart ?? null;
+
+        if (currentMapId === desiredMapId) {
+            logger.info(`[MapVoting S${this.serverNum}] Observed queued next map live: ${currentMapId}`);
+            queuedMapStore.markQueuedMapConsumed(this.serverNum, {
+                actualMapId: currentMapId,
+                currentMapId,
+                nextMapId
+            });
+            this.queuedNextMapId = null;
+            return {
+                pendingEntry: null,
+                awaitingQueuedTransition: false,
+                consumed: true,
+                failed: false
+            };
+        }
+
+        const sameMatchStillRunning = Number.isFinite(sourceMatchStartEpochSeconds) &&
+            Number.isFinite(currentMatchStartEpochSeconds) &&
+            currentMatchStartEpochSeconds === sourceMatchStartEpochSeconds;
+
+        if (sameMatchStillRunning) {
+            if (nextMapId !== desiredMapId) {
+                await this.reapplyPendingQueuedMap(pendingEntry, 'live next map drifted before match transition', snapshot);
+            } else {
+                queuedMapStore.markQueuedMapVerified(this.serverNum, {
+                    currentMapId,
+                    nextMapId
+                });
+            }
+
+            return {
+                pendingEntry,
+                awaitingQueuedTransition: true,
+                consumed: false,
+                failed: false
+            };
+        }
+
+        const advancedToDifferentMatch = Number.isFinite(sourceMatchStartEpochSeconds) &&
+            Number.isFinite(currentMatchStartEpochSeconds) &&
+            currentMatchStartEpochSeconds > sourceMatchStartEpochSeconds;
+
+        if (advancedToDifferentMatch && currentMapId && currentMapId !== desiredMapId) {
+            logger.error(
+                `[MapVoting S${this.serverNum}] Queued winner ${desiredMapId} was not played next; live map started on ${currentMapId}`
+            );
+            queuedMapStore.markQueuedMapFailed(this.serverNum, {
+                failureReason: 'wrong_map_started',
+                actualMapId: currentMapId,
+                currentMapId,
+                nextMapId,
+                lastError: `expected ${desiredMapId} but observed ${currentMapId}`
+            });
+            this.queuedNextMapId = null;
+            return {
+                pendingEntry: null,
+                awaitingQueuedTransition: false,
+                consumed: false,
+                failed: true
+            };
+        }
+
+        if (nextMapId !== desiredMapId) {
+            await this.reapplyPendingQueuedMap(pendingEntry, 'queued winner no longer matches live next map', snapshot);
+        } else {
+            queuedMapStore.markQueuedMapVerified(this.serverNum, {
+                currentMapId,
+                nextMapId
+            });
+        }
+
+        return {
+            pendingEntry,
+            awaitingQueuedTransition: false,
+            consumed: false,
+            failed: false
+        };
+    }
+
     // ==================== GAME STATE ====================
 
     async getGameState() {
@@ -735,6 +994,7 @@ class MapVotingService {
             if (typeof this.crcon?.getMatchSnapshot === 'function') {
                 const snapshot = await this.crcon.getMatchSnapshot();
                 const currentMapId = snapshot?.currentMapId || null;
+                const currentMatchStartEpochSeconds = snapshot?.matchStartEpochSeconds ?? null;
 
                 if (!currentMapId) {
                     if (this.gameActive === null) {
@@ -743,31 +1003,29 @@ class MapVotingService {
                     return this.gameActive;
                 }
 
-                if (this.queuedNextMapId) {
-                    if (currentMapId === this.queuedNextMapId) {
-                        logger.info(
-                            `[MapVoting S${this.serverNum}] Observed queued next map live: ${currentMapId}`
-                        );
-                        this.queuedNextMapId = null;
-                    } else if (this.lastObservedMatchMapId && currentMapId === this.lastObservedMatchMapId) {
-                        this.gameActive = false;
-                        return this.gameActive;
-                    } else {
-                        logger.warn(
-                            `[MapVoting S${this.serverNum}] Observed unexpected map transition to ${currentMapId} while waiting for queued next map ${this.queuedNextMapId}; clearing pending transition`
-                        );
-                        this.queuedNextMapId = null;
-                    }
+                const pendingQueueState = await this.reconcilePendingQueuedMap(snapshot);
+
+                if (pendingQueueState.awaitingQueuedTransition) {
+                    this.lastObservedMatchMapId = currentMapId;
+                    this.lastObservedMatchStartEpochSeconds = currentMatchStartEpochSeconds;
+                    this.gameActive = false;
+                    return this.gameActive;
                 }
 
                 if (!this.lastObservedMatchMapId) {
                     this.lastObservedMatchMapId = currentMapId;
+                    this.lastObservedMatchStartEpochSeconds = currentMatchStartEpochSeconds;
                     this.gameActive = true;
                     return this.gameActive;
                 }
 
-                if (this.lastObservedMatchMapId !== currentMapId) {
+                const matchStartChanged = Number.isFinite(currentMatchStartEpochSeconds) &&
+                    Number.isFinite(this.lastObservedMatchStartEpochSeconds) &&
+                    this.lastObservedMatchStartEpochSeconds !== currentMatchStartEpochSeconds;
+
+                if (this.lastObservedMatchMapId !== currentMapId || matchStartChanged) {
                     this.lastObservedMatchMapId = currentMapId;
+                    this.lastObservedMatchStartEpochSeconds = currentMatchStartEpochSeconds;
                     this.pendingMatchStartDetection = true;
                     this.gameActive = false;
                     return this.gameActive;
@@ -777,6 +1035,7 @@ class MapVotingService {
                     this.pendingMatchStartDetection = false;
                 }
 
+                this.lastObservedMatchStartEpochSeconds = currentMatchStartEpochSeconds;
                 this.gameActive = true;
                 return this.gameActive;
             }
@@ -927,6 +1186,13 @@ class MapVotingService {
 
         if (typeof this.crcon?.getStatus === 'function') {
             try {
+                if (typeof this.crcon?.getMatchSnapshot === 'function') {
+                    const snapshot = await this.crcon.getMatchSnapshot();
+                    if (snapshot?.currentMapId) {
+                        return snapshot.currentMapId;
+                    }
+                }
+
                 const liveStatus = await this.crcon.getStatus();
                 this.lastServerStatus = liveStatus;
                 return resolveCurrentMapId(liveStatus);
@@ -1124,8 +1390,9 @@ class MapVotingService {
                 );
             }
 
-            await this.crcon.queueNextMap(selectedMap.id);
-            this.queuedNextMapId = selectedMap.id;
+            await this.ensureDesiredNextMap(selectedMap.id, 'non-seeded-rotation', {
+                gameStart: this.gameStart ?? null
+            });
             logger.info(`[MapVoting S${this.serverNum}] Applied non-seeded rotation map: ${selectedMap.id}`);
             return true;
         } catch (error) {
@@ -1244,12 +1511,15 @@ class MapVotingService {
                 );
 
                 if (currentMapId && mapId === currentMapId) {
-                    logger.warn(`[MapVoting S${this.serverNum}] Selected next map matches current map: ${mapId}`);
+                    logger.error(`[MapVoting S${this.serverNum}] Refusing to queue voted map because it matches the live current map: ${mapId}`);
+                    throw new Error(`Vote selected the live current map ${mapId}`);
                 }
 
                 logger.info(`[MapVoting S${this.serverNum}] Setting next map: ${mapId}`);
-                await this.crcon.queueNextMap(mapId);
-                this.queuedNextMapId = mapId;
+                await this.ensureDesiredNextMap(mapId, 'seeded-vote', {
+                    gameStart: this.gameStart ?? null,
+                    voteMessageId: this.voteMessageId ?? null
+                });
             } else {
                 logger.warn(`[MapVoting S${this.serverNum}] Could not determine next map`);
             }
@@ -1483,7 +1753,12 @@ class MapVotingService {
                 }
 
                 if (matchEnded && !finalizedVoteThisTick) {
-                    if (this.skipNextUnseededMatchEndRotation) {
+                    const pendingQueuedMap = this.getPendingQueuedMap();
+                    if (pendingQueuedMap?.desiredMapId && pendingQueuedMap.source === 'seeded-vote') {
+                        logger.info(
+                            `[MapVoting S${this.serverNum}] Skipping non-seeded rotation because seeded vote winner ${pendingQueuedMap.desiredMapId} is still pending`
+                        );
+                    } else if (this.skipNextUnseededMatchEndRotation) {
                         logger.info(`[MapVoting S${this.serverNum}] Skipping non-seeded rotation because a seeded vote already selected the next map`);
                         this.skipNextUnseededMatchEndRotation = false;
                     } else {
