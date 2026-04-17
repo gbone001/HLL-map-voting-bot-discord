@@ -352,8 +352,8 @@ test('vote finalization random fallback uses live poll options instead of stale 
         }
     };
     service.crcon = {
-        post: async (_endpoint, payload) => {
-            selectedRotationMap = payload.map_names[0];
+        queueNextMap: async (mapId) => {
+            selectedRotationMap = mapId;
         }
     };
     service.getAllMaps = async () => ([
@@ -400,8 +400,8 @@ test('non-seeded rotation falls back to available maps when no non-seeded list i
     service.getRecentExcludedMapIds = async () => new Set(['omahabeach_warfare']);
     service.getCurrentMapId = async () => 'omahabeach_warfare';
     service.crcon = {
-        post: async (_endpoint, payload) => {
-            selectedRotationMap = payload.map_names[0];
+        queueNextMap: async (mapId) => {
+            selectedRotationMap = mapId;
         }
     };
 
@@ -436,8 +436,8 @@ test('non-seeded rotation avoids re-selecting the current map when alternatives 
     service.getRecentExcludedMapIds = async () => new Set(['omahabeach_warfare', 'utahbeach_warfare']);
     service.getCurrentMapId = async () => 'omahabeach_warfare';
     service.crcon = {
-        post: async (_endpoint, payload) => {
-            selectedRotationMap = payload.map_names[0];
+        queueNextMap: async (mapId) => {
+            selectedRotationMap = mapId;
         }
     };
 
@@ -448,5 +448,43 @@ test('non-seeded rotation avoids re-selecting the current map when alternatives 
         assert.equal(selectedRotationMap, 'utahbeach_warfare');
     } finally {
         configManager.config = originalConfig;
+    }
+});
+
+test('superseded service instance becomes inert before it can apply another rotation', async () => {
+    const firstService = new MapVotingService(1);
+    const secondService = new MapVotingService(1);
+    let firstRotationCalls = 0;
+
+    firstService.claimActiveServiceSlot();
+    secondService.claimActiveServiceSlot();
+
+    firstService.voteMapActive = false;
+    firstService.minimumPlayers = 50;
+    firstService.deactivatePlayers = 40;
+    firstService.gameActive = true;
+    firstService.applyScheduleSettings = async () => {};
+    firstService.getGameState = async () => {
+        firstService.gameActive = false;
+        return false;
+    };
+    firstService.crcon = {
+        getStatus: async () => ({ result: { current_players: 10 } })
+    };
+    firstService.applyNonSeededRotation = async () => {
+        firstRotationCalls += 1;
+        return true;
+    };
+
+    try {
+        await firstService.doMapVote();
+
+        assert.equal(firstRotationCalls, 0);
+        assert.equal(firstService.destroyed, true);
+        assert.equal(firstService.isActiveServiceInstance(), false);
+        assert.equal(secondService.isActiveServiceInstance(), true);
+    } finally {
+        firstService.stop();
+        secondService.stop();
     }
 });

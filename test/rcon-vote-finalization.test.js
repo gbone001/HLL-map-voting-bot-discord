@@ -191,6 +191,26 @@ test('vote finalization in fallback mode sends the voted winner through direct R
 
     const commands = [];
     crcon.client = {
+        get: async (url) => {
+            if (url === '/api/get_map_rotation') {
+                return {
+                    data: {
+                        result: {
+                            maps: [
+                                { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare' },
+                                { id: 'foy_warfare', pretty_name: 'Foy Warfare' },
+                                { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare' },
+                                { id: 'kharkov_warfare', pretty_name: 'Kharkov Warfare' }
+                            ],
+                            current_index: 0,
+                            next_index: 1
+                        }
+                    }
+                };
+            }
+
+            throw new Error(`Unexpected GET ${url}`);
+        },
         post: async () => {
             const error = new Error('Request failed with status code 500');
             error.response = { status: 500, statusText: 'Internal Server Error', data: {} };
@@ -281,6 +301,62 @@ test('direct RCON next-map selection uses currentIndex instead of sequence posit
             command: 'AddMapToSequence',
             payload: { MapName: 'stmereeglise_warfare', Index: 11 },
             endpoint: 'set_map_rotation'
+        }
+    ]);
+});
+
+test('API queueNextMap preserves the existing rotation instead of collapsing it to one map', async () => {
+    const crcon = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_ONLY,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token'
+    });
+
+    const getCalls = [];
+    const postCalls = [];
+    crcon.client = {
+        get: async (url) => {
+            getCalls.push(url);
+            if (url === '/api/get_map_rotation') {
+                return {
+                    data: {
+                        result: {
+                            maps: [
+                                { id: 'foy_warfare', pretty_name: 'Foy Warfare' },
+                                { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare' },
+                                { id: 'kharkov_warfare', pretty_name: 'Kharkov Warfare' }
+                            ],
+                            current_index: 0,
+                            next_index: 1
+                        }
+                    }
+                };
+            }
+
+            throw new Error(`Unexpected GET ${url}`);
+        },
+        post: async (url, payload) => {
+            postCalls.push({ url, payload });
+            return {
+                data: {
+                    result: {
+                        ok: true
+                    }
+                }
+            };
+        }
+    };
+
+    await crcon.queueNextMap('kharkov_warfare');
+
+    assert.deepEqual(getCalls, ['/api/get_map_rotation']);
+    assert.deepEqual(postCalls, [
+        {
+            url: '/api/set_map_rotation',
+            payload: {
+                map_names: ['foy_warfare', 'kharkov_warfare', 'utahbeach_warfare']
+            }
         }
     ]);
 });

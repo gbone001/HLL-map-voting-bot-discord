@@ -875,6 +875,50 @@ class CRCONService {
         return this.get('get_detailed_players');
     }
 
+    async queueNextMap(mapId) {
+        if (!mapId) {
+            throw new Error('queueNextMap requires a map ID');
+        }
+
+        const queueDirectNextMap = () => this.executeDirectEndpoint('post', 'set_map_rotation', { map_names: [mapId] });
+        const canUseDirectQueue = this.hasDirectRconConfigured() && this.isDirectFallbackEnabled();
+
+        if (this.transportMode === TRANSPORT_MODES.DIRECT_RCON) {
+            return queueDirectNextMap();
+        }
+
+        if (!this.hasApiConfigured()) {
+            if (canUseDirectQueue) {
+                return queueDirectNextMap();
+            }
+            throw new Error(`CRCON API is not configured for ${this.serverName}`);
+        }
+
+        if (this.transportMode === TRANSPORT_MODES.API_WITH_FALLBACK && this.isCrconCircuitOpen()) {
+            if (canUseDirectQueue) {
+                return queueDirectNextMap();
+            }
+        }
+
+        try {
+            const response = await this.queueNextMapViaApi(mapId);
+            if (this.transportMode === TRANSPORT_MODES.API_WITH_FALLBACK) {
+                this.recordApiSuccess();
+            }
+            return response;
+        } catch (error) {
+            if (this.transportMode !== TRANSPORT_MODES.API_WITH_FALLBACK || !canUseDirectQueue) {
+                throw error;
+            }
+
+            this.recordApiFailure(error);
+            logger.warn(
+                `[CRCON ${this.serverName}] Falling back to direct RCON for POST set_map_rotation`
+            );
+            return queueDirectNextMap();
+        }
+    }
+
     async setNextMap(mapId) {
         return this.post('set_map', { map_name: mapId });
     }
@@ -929,6 +973,99 @@ class CRCONService {
 
     async getMapHistory() {
         return this.get('get_map_history');
+    }
+
+    normalizeRotationState(rawValue) {
+        if (rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue)) {
+            const maps = Array.isArray(rawValue.maps)
+                ? rawValue.maps
+                : Array.isArray(rawValue.Maps)
+                    ? rawValue.Maps
+                    : [];
+
+            if (maps.length > 0) {
+                const entries = maps.map((entry, index) => {
+                    const mapId = this.resolveMapIdFromValues([
+                        entry?.id,
+                        entry?.pretty_name,
+                        entry?.map?.id,
+                        entry?.map?.pretty_name,
+                        entry?.map?.name,
+                        entry
+                    ]);
+                    const normalizedMap = this.findMapById(mapId) || buildMapStub(
+                        mapId,
+                        entry?.pretty_name || entry?.map?.pretty_name || entry?.map?.name || String(entry)
+                    );
+
+                    return {
+                        ...normalizedMap,
+                        sequencePosition: index
+                    };
+                });
+
+                const parsedCurrentIndex = Number.parseInt(rawValue.current_index ?? rawValue.CurrentIndex, 10);
+                const parsedNextIndex = Number.parseInt(rawValue.next_index ?? rawValue.NextIndex, 10);
+                return {
+                    currentIndex: Number.isNaN(parsedCurrentIndex) ? 0 : parsedCurrentIndex,
+                    nextIndex: Number.isNaN(parsedNextIndex) ? null : parsedNextIndex,
+                    entries
+                };
+            }
+        }
+
+        const directSequence = this.normalizeDirectSequenceState(rawValue);
+        return {
+            currentIndex: directSequence.currentIndex,
+            nextIndex: null,
+            entries: directSequence.entries
+        };
+    }
+
+    getWrappedNextIndex(currentIndex, entryCount) {
+        if (!entryCount || entryCount <= 0) {
+            return 0;
+        }
+
+        if (!Number.isInteger(currentIndex) || currentIndex < 0) {
+            return 0;
+        }
+
+        return currentIndex >= entryCount - 1 ? 0 : currentIndex + 1;
+    }
+
+    buildRotationWithQueuedNextMap(entries, nextIndex, mapId) {
+        const existingMapIds = entries.map((entry) => entry.id).filter(Boolean);
+        const filteredMapIds = existingMapIds.filter((entryId) => entryId !== mapId);
+        const normalizedNextIndex = Math.min(Math.max(nextIndex, 0), filteredMapIds.length);
+
+        filteredMapIds.splice(normalizedNextIndex, 0, mapId);
+        return filteredMapIds;
+    }
+
+    async queueNextMapViaApi(mapId) {
+        try {
+            const rotationResponse = await this.client.get('/api/get_map_rotation');
+            const rotationState = this.normalizeRotationState(rotationResponse?.data?.result);
+
+            const mapNames = rotationState.entries.length
+                ? this.buildRotationWithQueuedNextMap(
+                    rotationState.entries,
+                    Number.isInteger(rotationState.nextIndex)
+                        ? rotationState.nextIndex
+                        : this.getWrappedNextIndex(rotationState.currentIndex, rotationState.entries.length),
+                    mapId
+                )
+                : [mapId];
+
+            const response = await this.client.post('/api/set_map_rotation', { map_names: mapNames });
+            return response.data;
+        } catch (error) {
+            logger.error(
+                `[CRCON ${this.serverName}] queueNextMap failed: ${this.formatRequestError(error)}`
+            );
+            throw error;
+        }
     }
 
     async describeAutoModSoloTankConfig() {

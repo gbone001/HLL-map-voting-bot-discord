@@ -14,6 +14,9 @@ const configManager = require('./configManager');
 class MapVotingService {
     constructor(serverNum = 1) {
         MapVotingService.instanceCounter = (MapVotingService.instanceCounter || 0) + 1;
+        if (!MapVotingService.activeServicesByServer) {
+            MapVotingService.activeServicesByServer = new Map();
+        }
         this.serverNum = serverNum;
         this.instanceId = MapVotingService.instanceCounter;
         this.client = null;
@@ -100,6 +103,48 @@ class MapVotingService {
         this.queuedNextMapId = null;
     }
 
+    claimActiveServiceSlot() {
+        const activeServices = MapVotingService.activeServicesByServer;
+        const existingService = activeServices.get(this.serverNum);
+
+        if (existingService && existingService !== this) {
+            logger.warn(
+                `[MapVoting S${this.serverNum}] Replacing stale service instance ${existingService.instanceId} with instance ${this.instanceId}`
+            );
+            existingService.deactivateAsSuperseded(this.instanceId);
+        }
+
+        activeServices.set(this.serverNum, this);
+    }
+
+    releaseActiveServiceSlot() {
+        const activeServices = MapVotingService.activeServicesByServer;
+        if (activeServices.get(this.serverNum) === this) {
+            activeServices.delete(this.serverNum);
+        }
+    }
+
+    isActiveServiceInstance() {
+        const activeService = MapVotingService.activeServicesByServer?.get(this.serverNum);
+        return !activeService || activeService === this;
+    }
+
+    deactivateAsSuperseded(replacingInstanceId) {
+        if (this.destroyed) {
+            return;
+        }
+
+        this.stopPolling();
+        this.voteActive = false;
+        this.isRunning = false;
+        this.doingMapVote = false;
+        this.destroyed = true;
+
+        logger.warn(
+            `[MapVoting S${this.serverNum}] Service instance ${this.instanceId} superseded by instance ${replacingInstanceId}; polling disabled`
+        );
+    }
+
     // ==================== INITIALIZATION ====================
 
     async initialize(client, channelId, crconService) {
@@ -114,6 +159,7 @@ class MapVotingService {
                 return false;
             }
 
+            this.claimActiveServiceSlot();
             await this.getAllMaps();
             await this.getWhitelist();
 
@@ -1078,7 +1124,7 @@ class MapVotingService {
                 );
             }
 
-            await this.crcon.post('set_map_rotation', { map_names: [selectedMap.id] });
+            await this.crcon.queueNextMap(selectedMap.id);
             this.queuedNextMapId = selectedMap.id;
             logger.info(`[MapVoting S${this.serverNum}] Applied non-seeded rotation map: ${selectedMap.id}`);
             return true;
@@ -1202,7 +1248,7 @@ class MapVotingService {
                 }
 
                 logger.info(`[MapVoting S${this.serverNum}] Setting next map: ${mapId}`);
-                await this.crcon.post('set_map_rotation', { map_names: [mapId] });
+                await this.crcon.queueNextMap(mapId);
                 this.queuedNextMapId = mapId;
             } else {
                 logger.warn(`[MapVoting S${this.serverNum}] Could not determine next map`);
@@ -1347,6 +1393,10 @@ class MapVotingService {
 
     async doMapVote() {
         if (this.destroyed) return;
+        if (!this.isActiveServiceInstance()) {
+            this.deactivateAsSuperseded('active-registry');
+            return;
+        }
         if (this.isRunning) return;
 
         this.isRunning = true;
@@ -1608,6 +1658,7 @@ class MapVotingService {
         this.isRunning = false;
         this.voteActive = false;
         this.destroyed = true;
+        this.releaseActiveServiceSlot();
         logger.info(`[MapVoting S${this.serverNum}] Service stopped`);
     }
 }
