@@ -203,6 +203,68 @@ test('match snapshot keeps unknown current maps active using normalized fallback
     assert.ok(snapshot.matchStartEpochSeconds);
 });
 
+test('match snapshot prefers live public info when it disagrees with get_status', async () => {
+    const service = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_ONLY,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token'
+    });
+
+    const getCalls = [];
+    service.client = {
+        get: async (url) => {
+            getCalls.push(url);
+            if (url === '/api/get_status') {
+                return {
+                    data: {
+                        result: {
+                            current_players: 89,
+                            current_map: {
+                                id: 'stmereeglise_warfare',
+                                pretty_name: 'St. Mere Eglise Warfare'
+                            }
+                        }
+                    }
+                };
+            }
+
+            if (url === '/api/get_public_info') {
+                return {
+                    data: {
+                        result: {
+                            current_map: {
+                                map: {
+                                    id: 'omahabeach_warfare',
+                                    pretty_name: 'Omaha Beach Warfare'
+                                },
+                                start: 1776401600
+                            },
+                            next_map: {
+                                map: {
+                                    id: 'utahbeach_warfare',
+                                    pretty_name: 'Utah Beach Warfare'
+                                }
+                            },
+                            player_count: 89
+                        }
+                    }
+                };
+            }
+
+            throw new Error(`Unexpected GET ${url}`);
+        }
+    };
+
+    const snapshot = await service.getMatchSnapshot();
+
+    assert.deepEqual(getCalls, ['/api/get_status', '/api/get_public_info']);
+    assert.equal(snapshot.currentMapId, 'omahabeach_warfare');
+    assert.equal(snapshot.currentPlayers, 89);
+    assert.equal(snapshot.gameActive, true);
+    assert.equal(snapshot.matchStartEpochSeconds, 1776401600);
+});
+
 test('direct transport map catalog is warfare-only', async () => {
     const service = new CRCONService({
         serverName: 'Test Server',

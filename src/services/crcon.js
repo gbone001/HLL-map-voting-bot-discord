@@ -787,13 +787,19 @@ class CRCONService {
             statusPayload?.result?.raw?.map
         ]);
 
+        this.updateLocalMatchState(currentMapId);
+    }
+
+    updateLocalMatchState(currentMapId, matchStartEpochSeconds = null) {
         if (!currentMapId) {
             return;
         }
 
         if (!this.currentMatchMapId) {
             this.currentMatchMapId = currentMapId;
-            this.matchStartEpochMs = Date.now();
+            this.matchStartEpochMs = Number.isFinite(matchStartEpochSeconds)
+                ? matchStartEpochSeconds * 1000
+                : Date.now();
             return;
         }
 
@@ -812,32 +818,187 @@ class CRCONService {
             });
             this.localMapHistory = this.localMapHistory.slice(0, 10);
             this.currentMatchMapId = currentMapId;
-            this.matchStartEpochMs = Date.now();
+            this.matchStartEpochMs = Number.isFinite(matchStartEpochSeconds)
+                ? matchStartEpochSeconds * 1000
+                : Date.now();
+            return;
+        }
+
+        if (Number.isFinite(matchStartEpochSeconds)) {
+            this.matchStartEpochMs = matchStartEpochSeconds * 1000;
         }
     }
 
-    async getMatchSnapshot() {
-        const status = await this.getStatus();
+    normalizePublicInfoState(rawValue) {
+        const currentMap = rawValue?.current_map;
+        const nextMap = rawValue?.next_map;
+
+        const currentMapId = this.resolveObservedMapId([
+            currentMap?.map?.id,
+            currentMap?.id,
+            currentMap?.map?.pretty_name,
+            currentMap?.map?.name,
+            currentMap?.pretty_name,
+            currentMap?.name
+        ]);
+
+        const nextMapId = this.resolveObservedMapId([
+            nextMap?.map?.id,
+            nextMap?.id,
+            nextMap?.map?.pretty_name,
+            nextMap?.map?.name,
+            nextMap?.pretty_name,
+            nextMap?.name
+        ]);
+
+        const currentMapStart = currentMap?.start;
+        const matchStartEpochSeconds = typeof currentMapStart === 'number'
+            ? currentMapStart
+            : Number.isFinite(Date.parse(currentMapStart))
+                ? Math.floor(Date.parse(currentMapStart) / 1000)
+                : null;
+
         return {
-            currentMapId: this.resolveObservedMapId([
-                status?.result?.map?.id,
-                status?.result?.map?.pretty_name,
-                status?.result?.map?.name,
-                status?.result?.current_map?.id,
-                status?.result?.current_map?.pretty_name,
-                status?.result?.current_map?.name,
-                status?.result?.raw?.mapId,
-                status?.result?.raw?.map_id,
-                status?.result?.raw?.MapId,
-                status?.result?.raw?.mapName,
-                status?.result?.raw?.MapName,
-                status?.result?.raw?.CurrentMapName,
-                status?.result?.raw?.currentMap,
-                status?.result?.raw?.CurrentMap,
-                status?.result?.raw?.map
-            ]),
-            currentPlayers: status?.result?.current_players ?? 0,
-            gameActive: Boolean(status?.result?.map || status?.result?.current_map),
+            currentMapId,
+            nextMapId,
+            currentPlayers: rawValue?.player_count ?? rawValue?.playerCount ?? null,
+            gameActive: currentMapId ? Boolean(currentMap) : null,
+            matchStartEpochSeconds
+        };
+    }
+
+    async getPublicInfoState() {
+        if (!this.client) {
+            return null;
+        }
+
+        try {
+            const response = await this.client.get('/api/get_public_info');
+            return this.normalizePublicInfoState(response?.data?.result);
+        } catch (error) {
+            logger.warn(
+                `[CRCON ${this.serverName}] GET get_public_info failed during state sync: ${this.formatRequestError(error)}`
+            );
+            return null;
+        }
+    }
+
+    findRotationIndexForMap(entries, mapId, preferredIndex = null, excludedIndexes = []) {
+        if (!mapId || !Array.isArray(entries) || entries.length === 0) {
+            return -1;
+        }
+
+        const excludedIndexSet = new Set(excludedIndexes.filter(Number.isInteger));
+        const matchingIndexes = entries
+            .map((entry, index) => ({ id: entry?.id, index }))
+            .filter((entry) => entry.id === mapId && !excludedIndexSet.has(entry.index))
+            .map((entry) => entry.index);
+
+        if (matchingIndexes.length === 0) {
+            return -1;
+        }
+
+        if (Number.isInteger(preferredIndex) && matchingIndexes.includes(preferredIndex)) {
+            return preferredIndex;
+        }
+
+        if (Number.isInteger(preferredIndex)) {
+            const nearestUpcomingIndex = matchingIndexes.find((index) => index > preferredIndex);
+            if (nearestUpcomingIndex !== undefined) {
+                return nearestUpcomingIndex;
+            }
+
+            const nearestPriorIndex = [...matchingIndexes].reverse().find((index) => index < preferredIndex);
+            if (nearestPriorIndex !== undefined) {
+                return nearestPriorIndex;
+            }
+        }
+
+        return matchingIndexes[0];
+    }
+
+    reconcileRotationStateWithLiveState(rotationState, publicInfoState) {
+        if (!rotationState || !Array.isArray(rotationState.entries) || rotationState.entries.length === 0 || !publicInfoState) {
+            return rotationState;
+        }
+
+        let currentIndex = rotationState.currentIndex;
+        let nextIndex = rotationState.nextIndex;
+
+        if (publicInfoState.currentMapId) {
+            const observedCurrentIndex = this.findRotationIndexForMap(
+                rotationState.entries,
+                publicInfoState.currentMapId,
+                currentIndex
+            );
+
+            if (observedCurrentIndex >= 0 && observedCurrentIndex !== currentIndex) {
+                logger.warn(
+                    `[CRCON ${this.serverName}] Rotation current_index ${currentIndex} is stale; using live current map ${publicInfoState.currentMapId} at index ${observedCurrentIndex}`
+                );
+                currentIndex = observedCurrentIndex;
+            }
+        }
+
+        if (publicInfoState.nextMapId) {
+            const observedNextIndex = this.findRotationIndexForMap(
+                rotationState.entries,
+                publicInfoState.nextMapId,
+                nextIndex,
+                [currentIndex]
+            );
+
+            if (observedNextIndex >= 0 && observedNextIndex !== nextIndex) {
+                logger.warn(
+                    `[CRCON ${this.serverName}] Rotation next_index ${nextIndex} is stale; using live next map ${publicInfoState.nextMapId} at index ${observedNextIndex}`
+                );
+                nextIndex = observedNextIndex;
+            }
+        }
+
+        if (!Number.isInteger(nextIndex) || nextIndex < 0 || nextIndex >= rotationState.entries.length || nextIndex === currentIndex) {
+            nextIndex = this.getWrappedNextIndex(currentIndex, rotationState.entries.length);
+        }
+
+        return {
+            ...rotationState,
+            currentIndex,
+            nextIndex
+        };
+    }
+
+    async getMatchSnapshot() {
+        const [status, publicInfoState] = await Promise.all([
+            this.getStatus(),
+            this.getPublicInfoState()
+        ]);
+        const statusCurrentMapId = this.resolveObservedMapId([
+            status?.result?.map?.id,
+            status?.result?.map?.pretty_name,
+            status?.result?.map?.name,
+            status?.result?.current_map?.id,
+            status?.result?.current_map?.pretty_name,
+            status?.result?.current_map?.name,
+            status?.result?.raw?.mapId,
+            status?.result?.raw?.map_id,
+            status?.result?.raw?.MapId,
+            status?.result?.raw?.mapName,
+            status?.result?.raw?.MapName,
+            status?.result?.raw?.CurrentMapName,
+            status?.result?.raw?.currentMap,
+            status?.result?.raw?.CurrentMap,
+            status?.result?.raw?.map
+        ]);
+        const currentMapId = publicInfoState?.currentMapId || statusCurrentMapId || null;
+
+        if (currentMapId) {
+            this.updateLocalMatchState(currentMapId, publicInfoState?.matchStartEpochSeconds ?? null);
+        }
+
+        return {
+            currentMapId,
+            currentPlayers: status?.result?.current_players ?? publicInfoState?.currentPlayers ?? 0,
+            gameActive: publicInfoState?.gameActive ?? Boolean(status?.result?.map || status?.result?.current_map),
             matchStartEpochSeconds: this.matchStartEpochMs
                 ? Math.floor(this.matchStartEpochMs / 1000)
                 : null
@@ -1045,8 +1206,14 @@ class CRCONService {
 
     async queueNextMapViaApi(mapId) {
         try {
-            const rotationResponse = await this.client.get('/api/get_map_rotation');
-            const rotationState = this.normalizeRotationState(rotationResponse?.data?.result);
+            const [rotationResponse, publicInfoState] = await Promise.all([
+                this.client.get('/api/get_map_rotation'),
+                this.getPublicInfoState()
+            ]);
+            const rotationState = this.reconcileRotationStateWithLiveState(
+                this.normalizeRotationState(rotationResponse?.data?.result),
+                publicInfoState
+            );
 
             const mapNames = rotationState.entries.length
                 ? this.buildRotationWithQueuedNextMap(
