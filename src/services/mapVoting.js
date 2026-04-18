@@ -15,6 +15,8 @@ const queuedMapStore = require('./queuedMapStore');
 const QUEUED_MAP_REAPPLY_COOLDOWN_MS = 30000;
 const QUEUED_MAP_VERIFY_RETRIES = 3;
 const QUEUED_MAP_VERIFY_RETRY_DELAY_MS = 1000;
+const MATCH_END_FORCE_MAP_RETRIES = 5;
+const MATCH_END_FORCE_MAP_RETRY_DELAY_MS = 2000;
 
 class MapVotingService {
     constructor(serverNum = 1) {
@@ -857,6 +859,74 @@ class MapVotingService {
         throw lastError || new Error(`Failed to verify queued next map ${mapId}`);
     }
 
+    async forceMapLiveAfterMatchEnd(mapId, source, options = {}) {
+        const queuedResult = await this.ensureDesiredNextMap(mapId, source, options);
+        let latestLiveState = queuedResult?.liveState || null;
+        let lastError = null;
+
+        if (latestLiveState?.currentMapId === mapId) {
+            return {
+                ...queuedResult,
+                forced: false
+            };
+        }
+
+        logger.warn(
+            `[MapVoting S${this.serverNum}] Match already ended; forcing selected map live with set_map: ${mapId}`
+        );
+
+        for (let attempt = 1; attempt <= MATCH_END_FORCE_MAP_RETRIES; attempt += 1) {
+            try {
+                await this.crcon.setNextMap(mapId);
+                latestLiveState = await this.readLiveQueuedMapState();
+
+                queuedMapStore.noteEnforcement(this.serverNum, {
+                    currentMapId: latestLiveState?.currentMapId ?? null,
+                    nextMapId: latestLiveState?.nextMapId ?? null,
+                    incrementReapplyCount: true
+                });
+
+                if (latestLiveState?.currentMapId === mapId) {
+                    queuedMapStore.markQueuedMapConsumed(this.serverNum, {
+                        actualMapId: mapId,
+                        currentMapId: mapId,
+                        nextMapId: latestLiveState?.nextMapId ?? null
+                    });
+                    this.queuedNextMapId = null;
+                    return {
+                        queued: true,
+                        consumed: true,
+                        forced: true,
+                        liveState: latestLiveState
+                    };
+                }
+
+                lastError = new Error(
+                    `expected live map ${mapId} after match end but observed ${latestLiveState?.currentMapId || 'unknown'}`
+                );
+            } catch (error) {
+                lastError = error;
+                queuedMapStore.noteEnforcement(this.serverNum, {
+                    currentMapId: latestLiveState?.currentMapId ?? null,
+                    nextMapId: latestLiveState?.nextMapId ?? null,
+                    lastError: error.message,
+                    incrementReapplyCount: true
+                });
+            }
+
+            if (attempt < MATCH_END_FORCE_MAP_RETRIES) {
+                await this.sleep(MATCH_END_FORCE_MAP_RETRY_DELAY_MS);
+            }
+        }
+
+        queuedMapStore.updateQueuedMap(this.serverNum, (entry) => ({
+            ...entry,
+            lastError: lastError?.message || `failed to force live map ${mapId} after match end`
+        }));
+
+        throw lastError || new Error(`Failed to force live map ${mapId} after match end`);
+    }
+
     async reapplyPendingQueuedMap(pendingEntry, reason, liveState = null) {
         if (!pendingEntry?.desiredMapId) {
             return false;
@@ -995,6 +1065,7 @@ class MapVotingService {
                 const snapshot = await this.crcon.getMatchSnapshot();
                 const currentMapId = snapshot?.currentMapId || null;
                 const currentMatchStartEpochSeconds = snapshot?.matchStartEpochSeconds ?? null;
+                const snapshotGameActive = snapshot?.gameActive;
 
                 if (!currentMapId) {
                     if (this.gameActive === null) {
@@ -1006,6 +1077,13 @@ class MapVotingService {
                 const pendingQueueState = await this.reconcilePendingQueuedMap(snapshot);
 
                 if (pendingQueueState.awaitingQueuedTransition) {
+                    this.lastObservedMatchMapId = currentMapId;
+                    this.lastObservedMatchStartEpochSeconds = currentMatchStartEpochSeconds;
+                    this.gameActive = false;
+                    return this.gameActive;
+                }
+
+                if (snapshotGameActive === false) {
                     this.lastObservedMatchMapId = currentMapId;
                     this.lastObservedMatchStartEpochSeconds = currentMatchStartEpochSeconds;
                     this.gameActive = false;
@@ -1334,7 +1412,7 @@ class MapVotingService {
         }
     }
 
-    async applyNonSeededRotation() {
+    async applyNonSeededRotation(options = {}) {
         try {
             const nonSeededMapList = configManager.getNonSeededMapList(this.serverNum);
             const allMaps = await this.getAllMaps();
@@ -1390,9 +1468,14 @@ class MapVotingService {
                 );
             }
 
-            await this.ensureDesiredNextMap(selectedMap.id, 'non-seeded-rotation', {
+            const enqueueOptions = {
                 gameStart: this.gameStart ?? null
-            });
+            };
+            if (options.matchEnded) {
+                await this.forceMapLiveAfterMatchEnd(selectedMap.id, 'non-seeded-rotation', enqueueOptions);
+            } else {
+                await this.ensureDesiredNextMap(selectedMap.id, 'non-seeded-rotation', enqueueOptions);
+            }
             logger.info(`[MapVoting S${this.serverNum}] Applied non-seeded rotation map: ${selectedMap.id}`);
             return true;
         } catch (error) {
@@ -1483,7 +1566,7 @@ class MapVotingService {
         }
     }
 
-    async setVoteResult() {
+    async setVoteResult(finalizationReason = 'manual') {
         try {
             const allMaps = await this.getAllMaps();
             const recentMapIds = allMaps?.length > 0 ? await this.getRecentExcludedMapIds(allMaps) : new Set();
@@ -1515,11 +1598,19 @@ class MapVotingService {
                     throw new Error(`Vote selected the live current map ${mapId}`);
                 }
 
-                logger.info(`[MapVoting S${this.serverNum}] Setting next map: ${mapId}`);
-                await this.ensureDesiredNextMap(mapId, 'seeded-vote', {
+                logger.info(
+                    `[MapVoting S${this.serverNum}] Setting ${finalizationReason === 'match-ended' ? 'next/live' : 'next'} map: ${mapId}`
+                );
+                const queueOptions = {
                     gameStart: this.gameStart ?? null,
                     voteMessageId: this.voteMessageId ?? null
-                });
+                };
+
+                if (finalizationReason === 'match-ended') {
+                    await this.forceMapLiveAfterMatchEnd(mapId, 'seeded-vote', queueOptions);
+                } else {
+                    await this.ensureDesiredNextMap(mapId, 'seeded-vote', queueOptions);
+                }
             } else {
                 logger.warn(`[MapVoting S${this.serverNum}] Could not determine next map`);
             }
@@ -1582,7 +1673,7 @@ class MapVotingService {
         }
     }
 
-    async stopVote() {
+    async stopVote(finalizationReason = 'manual') {
         if (this.voteFinalizationInProgress) {
             logger.warn(`[MapVoting S${this.serverNum}] Vote finalization already in progress; skipping duplicate stopVote`);
             return null;
@@ -1628,7 +1719,7 @@ class MapVotingService {
                     );
                 }
             }
-            const finalizedMapId = await this.setVoteResult();
+            const finalizedMapId = await this.setVoteResult(finalizationReason);
 
             if (finalizationClaimed) {
                 voteStore.completeVoteFinalization(
@@ -1720,7 +1811,7 @@ class MapVotingService {
 
             if (justDroppedOutOfSeeded && this.voteActive) {
                 logger.info(`[MapVoting S${this.serverNum}] Seeded state lost while vote active, finalizing current vote`);
-                const finalizedMapId = await this.stopVote();
+                const finalizedMapId = await this.stopVote('seeded-drop');
                 if (finalizedMapId) {
                     this.skipNextUnseededMatchEndRotation = true;
                 }
@@ -1737,7 +1828,7 @@ class MapVotingService {
                     this.reminderCount = 0;
                 } else if (!this.gameActive && this.voteActive) {
                     logger.info(`[MapVoting S${this.serverNum}] Game over, stopping vote...`);
-                    await this.stopVote();
+                    await this.stopVote('match-ended');
                     this.lastReminderTime = null;
                 }
 
@@ -1762,7 +1853,7 @@ class MapVotingService {
                         logger.info(`[MapVoting S${this.serverNum}] Skipping non-seeded rotation because a seeded vote already selected the next map`);
                         this.skipNextUnseededMatchEndRotation = false;
                     } else {
-                        await this.applyNonSeededRotation();
+                        await this.applyNonSeededRotation({ matchEnded: true });
                     }
                 }
             }

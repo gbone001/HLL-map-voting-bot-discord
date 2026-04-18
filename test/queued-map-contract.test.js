@@ -246,3 +246,66 @@ test('queued map contract verifies a direct-RCON queued winner through sequence 
 
     await clearServer(serverNum);
 });
+
+test('match-ended vote finalization forces the voted winner live instead of leaving it queued-only', async () => {
+    const serverNum = 95;
+    await clearServer(serverNum);
+
+    const service = new MapVotingService(serverNum);
+    service.gameStart = 7000;
+    service.voteMessageId = 'vote-95';
+    service.maps = [
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare' }
+    ];
+    service.channel = {
+        messages: {
+            fetch: async () => ({
+                poll: {
+                    answers: new Map([
+                        ['1', { text: 'Omaha Beach Warfare', voteCount: 5 }]
+                    ])
+                }
+            })
+        }
+    };
+
+    const liveState = buildSnapshot({
+        currentMapId: 'foy_warfare',
+        nextMapId: 'omahabeach_warfare',
+        matchStartEpochSeconds: 7000
+    });
+
+    let queueCalls = 0;
+    let setMapCalls = 0;
+
+    service.crcon = {
+        getMatchSnapshot: async () => ({ ...liveState }),
+        getPublicInfoState: async () => ({ ...liveState }),
+        queueNextMap: async (mapId) => {
+            queueCalls += 1;
+            liveState.nextMapId = mapId;
+        },
+        setNextMap: async (mapId) => {
+            setMapCalls += 1;
+            liveState.currentMapId = mapId;
+            liveState.matchStartEpochSeconds = 8000;
+        }
+    };
+
+    service.getAllMaps = async () => ([
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Omaha Beach' } }
+    ]);
+    service.getRecentExcludedMapIds = async () => new Set();
+    service.getCurrentMapId = async () => 'foy_warfare';
+
+    const finalizedMapId = await service.setVoteResult('match-ended');
+    const lastEntry = queuedMapStore.getLastEntry(serverNum);
+
+    assert.equal(finalizedMapId, 'omahabeach_warfare');
+    assert.equal(queueCalls, 1);
+    assert.equal(setMapCalls, 1);
+    assert.equal(lastEntry.state, 'consumed');
+    assert.equal(lastEntry.actualMapId, 'omahabeach_warfare');
+
+    await clearServer(serverNum);
+});

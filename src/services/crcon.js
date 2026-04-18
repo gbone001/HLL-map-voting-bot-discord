@@ -891,6 +891,91 @@ class CRCONService {
         };
     }
 
+    normalizeGameStateState(rawValue) {
+        const value = rawValue?.result ?? rawValue;
+
+        if (typeof value === 'boolean') {
+            return { gameActive: value };
+        }
+
+        const objectCandidate = value && typeof value === 'object' ? value : null;
+        if (objectCandidate) {
+            const booleanFields = [
+                objectCandidate.game_active,
+                objectCandidate.gameActive,
+                objectCandidate.active,
+                objectCandidate.in_progress,
+                objectCandidate.inProgress,
+                objectCandidate.started,
+                objectCandidate.running
+            ];
+
+            for (const fieldValue of booleanFields) {
+                if (typeof fieldValue === 'boolean') {
+                    return { gameActive: fieldValue };
+                }
+            }
+
+            const stringFields = [
+                objectCandidate.state,
+                objectCandidate.status,
+                objectCandidate.phase,
+                objectCandidate.name,
+                objectCandidate.value
+            ];
+
+            for (const fieldValue of stringFields) {
+                const normalized = this.normalizeGameStateString(fieldValue);
+                if (normalized !== null) {
+                    return { gameActive: normalized };
+                }
+            }
+        }
+
+        const normalizedString = this.normalizeGameStateString(value);
+        return {
+            gameActive: normalizedString
+        };
+    }
+
+    normalizeGameStateString(value) {
+        if (typeof value !== 'string') {
+            return null;
+        }
+
+        const normalized = value.trim().toLowerCase();
+        if (!normalized) {
+            return null;
+        }
+
+        if (
+            normalized.includes('match ended') ||
+            normalized.includes('game over') ||
+            normalized.includes('round over') ||
+            normalized.includes('ended') ||
+            normalized.includes('postmatch') ||
+            normalized.includes('post_match') ||
+            normalized.includes('warmup') ||
+            normalized.includes('waiting')
+        ) {
+            return false;
+        }
+
+        if (
+            normalized.includes('match start') ||
+            normalized.includes('in progress') ||
+            normalized.includes('in_progress') ||
+            normalized.includes('playing') ||
+            normalized.includes('started') ||
+            normalized.includes('active') ||
+            normalized.includes('live')
+        ) {
+            return true;
+        }
+
+        return null;
+    }
+
     async getPublicInfoState() {
         if (!this.client) {
             return null;
@@ -902,6 +987,22 @@ class CRCONService {
         } catch (error) {
             logger.warn(
                 `[CRCON ${this.serverName}] GET get_public_info failed during state sync: ${this.formatRequestError(error)}`
+            );
+            return null;
+        }
+    }
+
+    async getGameStateState() {
+        if (!this.client) {
+            return null;
+        }
+
+        try {
+            const response = await this.client.get('/api/get_gamestate');
+            return this.normalizeGameStateState(response?.data);
+        } catch (error) {
+            logger.warn(
+                `[CRCON ${this.serverName}] GET get_gamestate failed during state sync: ${this.formatRequestError(error)}`
             );
             return null;
         }
@@ -992,9 +1093,10 @@ class CRCONService {
     }
 
     async getMatchSnapshot() {
-        const [status, publicInfoState] = await Promise.all([
+        const [status, publicInfoState, gameStateState] = await Promise.all([
             this.getStatus(),
-            this.getPublicInfoState()
+            this.getPublicInfoState(),
+            this.getGameStateState()
         ]);
         const statusCurrentMapId = this.resolveObservedMapId([
             status?.result?.map?.id,
@@ -1035,7 +1137,7 @@ class CRCONService {
             currentMapId,
             nextMapId: publicInfoState?.nextMapId || directNextMapId || null,
             currentPlayers: status?.result?.current_players ?? publicInfoState?.currentPlayers ?? 0,
-            gameActive: publicInfoState?.gameActive ?? Boolean(status?.result?.map || status?.result?.current_map),
+            gameActive: gameStateState?.gameActive ?? publicInfoState?.gameActive ?? Boolean(status?.result?.map || status?.result?.current_map),
             matchStartEpochSeconds: this.matchStartEpochMs
                 ? Math.floor(this.matchStartEpochMs / 1000)
                 : null

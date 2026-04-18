@@ -237,6 +237,50 @@ test('match snapshot fallback detects a map change as a match boundary', async (
     assert.equal(resumedTick, true);
 });
 
+test('explicit snapshot gameActive=false marks the match ended before the map changes', async () => {
+    const service = new MapVotingService(1);
+    const snapshots = [
+        {
+            currentMapId: 'foy_warfare',
+            currentPlayers: 52,
+            gameActive: true,
+            matchStartEpochSeconds: 1000
+        },
+        {
+            currentMapId: 'foy_warfare',
+            currentPlayers: 50,
+            gameActive: false,
+            matchStartEpochSeconds: 1000
+        },
+        {
+            currentMapId: 'omahabeach_warfare',
+            currentPlayers: 48,
+            gameActive: true,
+            matchStartEpochSeconds: 2000
+        },
+        {
+            currentMapId: 'omahabeach_warfare',
+            currentPlayers: 48,
+            gameActive: true,
+            matchStartEpochSeconds: 2000
+        }
+    ];
+
+    service.crcon = {
+        getMatchSnapshot: async () => snapshots.shift()
+    };
+
+    const firstTick = await service.getGameState();
+    const endTick = await service.getGameState();
+    const boundaryTick = await service.getGameState();
+    const resumedTick = await service.getGameState();
+
+    assert.equal(firstTick, true);
+    assert.equal(endTick, false);
+    assert.equal(boundaryTick, false);
+    assert.equal(resumedTick, true);
+});
+
 test('duplicate vote finalization claims do not overwrite the first selected map', async () => {
     const gameStart = Date.now() + Math.floor(Math.random() * 100000);
     const serverNum = 1;
@@ -332,6 +376,41 @@ test('stopVote still finalizes the next map when the Discord poll has already ex
         assert.equal(setVoteResultCalls, 1);
         assert.equal(service.voteActive, false);
         assert.equal(voteStore.getVote(gameStart, serverNum), null);
+    } finally {
+        voteStore.deleteVote(gameStart, serverNum);
+    }
+});
+
+test('stopVote passes the match-ended finalization reason through to vote result handling', async () => {
+    const gameStart = Date.now() + Math.floor(Math.random() * 100000);
+    const serverNum = 1;
+    const messageId = `vote-${gameStart}`;
+    let observedReason = null;
+
+    voteStore.deleteVote(gameStart, serverNum);
+    voteStore.setVote(messageId, gameStart, serverNum, [
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare' }
+    ]);
+
+    const service = new MapVotingService(serverNum);
+    service.gameStart = gameStart;
+    service.voteMessageId = messageId;
+    service.voteActive = true;
+    service.voteMessage = {
+        poll: {
+            end: async () => {}
+        }
+    };
+    service.setVoteResult = async (finalizationReason) => {
+        observedReason = finalizationReason;
+        return 'omahabeach_warfare';
+    };
+
+    try {
+        const finalizedMapId = await service.stopVote('match-ended');
+
+        assert.equal(finalizedMapId, 'omahabeach_warfare');
+        assert.equal(observedReason, 'match-ended');
     } finally {
         voteStore.deleteVote(gameStart, serverNum);
     }
@@ -479,6 +558,60 @@ test('non-seeded rotation avoids re-selecting the current map when alternatives 
 
         assert.equal(applied, true);
         assert.equal(selectedRotationMap, 'utahbeach_warfare');
+    } finally {
+        configManager.config = originalConfig;
+    }
+});
+
+test('non-seeded rotation forces the selected map live when invoked after match end', async () => {
+    const originalConfig = JSON.parse(JSON.stringify(configManager.config));
+    const service = new MapVotingService(1);
+    let queueCalls = 0;
+    let setMapCalls = 0;
+
+    configManager.config.servers = {
+        ...configManager.config.servers,
+        1: {
+            ...(configManager.config.servers?.[1] || {}),
+            nonSeededMapList: ['utahbeach_warfare']
+        }
+    };
+
+    const liveState = {
+        currentMapId: 'foy_warfare',
+        nextMapId: 'utahbeach_warfare',
+        currentPlayers: 20,
+        gameActive: false,
+        matchStartEpochSeconds: 9000
+    };
+
+    service.blacklist = [];
+    service.crcon = {
+        getPublicInfoState: async () => ({ ...liveState }),
+        getMatchSnapshot: async () => ({ ...liveState }),
+        queueNextMap: async (mapId) => {
+            queueCalls += 1;
+            liveState.nextMapId = mapId;
+        },
+        setNextMap: async (mapId) => {
+            setMapCalls += 1;
+            liveState.currentMapId = mapId;
+            liveState.matchStartEpochSeconds = 9001;
+        }
+    };
+    service.getAllMaps = async () => ([
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Utah Beach' } }
+    ]);
+    service.getRecentExcludedMapIds = async () => new Set();
+    service.getCurrentMapId = async () => 'foy_warfare';
+
+    try {
+        const applied = await service.applyNonSeededRotation({ matchEnded: true });
+
+        assert.equal(applied, true);
+        assert.equal(queueCalls, 1);
+        assert.equal(setMapCalls, 1);
+        assert.equal(liveState.currentMapId, 'utahbeach_warfare');
     } finally {
         configManager.config = originalConfig;
     }

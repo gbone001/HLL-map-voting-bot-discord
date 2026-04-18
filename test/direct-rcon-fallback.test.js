@@ -302,17 +302,95 @@ test('match snapshot prefers live public info when it disagrees with get_status'
                 };
             }
 
+            if (url === '/api/get_gamestate') {
+                return {
+                    data: {
+                        result: {
+                            state: 'in_progress'
+                        }
+                    }
+                };
+            }
+
             throw new Error(`Unexpected GET ${url}`);
         }
     };
 
     const snapshot = await service.getMatchSnapshot();
 
-    assert.deepEqual(getCalls, ['/api/get_status', '/api/get_public_info']);
+    assert.deepEqual(getCalls, ['/api/get_status', '/api/get_public_info', '/api/get_gamestate']);
     assert.equal(snapshot.currentMapId, 'omahabeach_warfare');
     assert.equal(snapshot.currentPlayers, 89);
     assert.equal(snapshot.gameActive, true);
     assert.equal(snapshot.matchStartEpochSeconds, 1776401600);
+});
+
+test('match snapshot honors explicit get_gamestate=false even when current map is still present', async () => {
+    const service = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_ONLY,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token'
+    });
+
+    service.client = {
+        get: async (url) => {
+            if (url === '/api/get_status') {
+                return {
+                    data: {
+                        result: {
+                            current_players: 84,
+                            current_map: {
+                                id: 'foy_warfare',
+                                pretty_name: 'Foy Warfare'
+                            }
+                        }
+                    }
+                };
+            }
+
+            if (url === '/api/get_public_info') {
+                return {
+                    data: {
+                        result: {
+                            current_map: {
+                                map: {
+                                    id: 'foy_warfare',
+                                    pretty_name: 'Foy Warfare'
+                                },
+                                start: 1776401600
+                            },
+                            next_map: {
+                                map: {
+                                    id: 'omahabeach_warfare',
+                                    pretty_name: 'Omaha Beach Warfare'
+                                }
+                            },
+                            player_count: 84
+                        }
+                    }
+                };
+            }
+
+            if (url === '/api/get_gamestate') {
+                return {
+                    data: {
+                        result: {
+                            state: 'match ended'
+                        }
+                    }
+                };
+            }
+
+            throw new Error(`Unexpected GET ${url}`);
+        }
+    };
+
+    const snapshot = await service.getMatchSnapshot();
+
+    assert.equal(snapshot.currentMapId, 'foy_warfare');
+    assert.equal(snapshot.nextMapId, 'omahabeach_warfare');
+    assert.equal(snapshot.gameActive, false);
 });
 
 test('direct transport map catalog is warfare-only', async () => {
