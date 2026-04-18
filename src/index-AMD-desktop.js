@@ -43,7 +43,6 @@ let healthServer = null;
 const autoModSoloTankDrafts = new Map();
 const autoModNoLeaderDrafts = new Map();
 const autoModLevelDrafts = new Map();
-let initializeServersPromise = null;
 
 function buildHealthPayload() {
     return {
@@ -95,55 +94,42 @@ function startHealthServer() {
 
 // Initialize servers from config
 async function initializeServers() {
-    if (initializeServersPromise) {
-        logger.warn('initializeServers already running; waiting for the active refresh to finish');
-        return initializeServersPromise;
+    // Stop and clear existing services
+    for (const key of Object.keys(mapVotingServices)) {
+        if (mapVotingServices[key] && mapVotingServices[key].stop) {
+            mapVotingServices[key].stop();
+        }
+        delete mapVotingServices[key];
+    }
+    for (const key of Object.keys(crconServices)) {
+        delete crconServices[key];
     }
 
-    initializeServersPromise = (async () => {
-        // Stop and clear existing services
-        for (const key of Object.keys(mapVotingServices)) {
-            if (mapVotingServices[key] && mapVotingServices[key].stop) {
-                mapVotingServices[key].stop();
+    // Load servers from configManager (merges saved config with .env)
+    for (let serverNum = 1; serverNum <= 4; serverNum++) {
+        const config = configManager.getEffectiveServerConfig(serverNum);
+
+        if (config.configured && config.channelId) {
+            // Create CRCON service
+            const crcon = new CRCONService(config);
+            crconServices[serverNum] = crcon;
+
+            // Create map voting service
+            const service = new MapVotingService(serverNum);
+            if (typeof config.excludePlayedMapForXvotes === 'number') {
+                service.setConfig('excludeRecentMaps', config.excludePlayedMapForXvotes);
             }
-            delete mapVotingServices[key];
-        }
-        for (const key of Object.keys(crconServices)) {
-            delete crconServices[key];
-        }
+            const success = await service.initialize(client, config.channelId, crcon);
 
-        // Load servers from configManager (merges saved config with .env)
-        for (let serverNum = 1; serverNum <= 4; serverNum++) {
-            const config = configManager.getEffectiveServerConfig(serverNum);
-
-            if (config.configured && config.channelId) {
-                // Create CRCON service
-                const crcon = new CRCONService(config);
-                crconServices[serverNum] = crcon;
-
-                // Create map voting service
-                const service = new MapVotingService(serverNum);
-                if (typeof config.excludePlayedMapForXvotes === 'number') {
-                    service.setConfig('excludeRecentMaps', config.excludePlayedMapForXvotes);
-                }
-                const success = await service.initialize(client, config.channelId, crcon);
-
-                if (success) {
-                    mapVotingServices[serverNum] = service;
-                    logger.info(`${config.serverName} Map Voting initialized`);
-                } else {
-                    logger.error(`${config.serverName} Map Voting failed to initialize`);
-                }
+            if (success) {
+                mapVotingServices[serverNum] = service;
+                logger.info(`${config.serverName} Map Voting initialized`);
             } else {
-                logger.info(`Server ${serverNum} not configured, skipping`);
+                logger.error(`${config.serverName} Map Voting failed to initialize`);
             }
+        } else {
+            logger.info(`Server ${serverNum} not configured, skipping`);
         }
-    })();
-
-    try {
-        await initializeServersPromise;
-    } finally {
-        initializeServersPromise = null;
     }
 }
 

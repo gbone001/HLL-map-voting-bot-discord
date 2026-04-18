@@ -505,39 +505,6 @@ class CRCONService {
         };
     }
 
-    async getDirectSequenceState() {
-        const response = await this.executeDirectCommand(
-            'GetServerInformation',
-            { Name: 'mapsequence', Value: '' },
-            'get_map_rotation'
-        );
-
-        return this.normalizeDirectSequenceState(response.result);
-    }
-
-    getDirectSequenceNextMapId(sequenceState, currentMapId = null) {
-        if (!sequenceState || !Array.isArray(sequenceState.entries) || sequenceState.entries.length === 0) {
-            return null;
-        }
-
-        let currentIndex = Number.isInteger(sequenceState.currentIndex)
-            ? sequenceState.currentIndex
-            : 0;
-
-        if (currentMapId) {
-            const matchingEntry = sequenceState.entries.find((entry) => entry.id === currentMapId);
-            if (matchingEntry && Number.isInteger(matchingEntry.sequencePosition)) {
-                currentIndex = matchingEntry.sequencePosition;
-            }
-        }
-
-        const nextIndex = this.getDirectNextSequencePosition(sequenceState.entries, currentIndex);
-        const nextEntry = sequenceState.entries.find((entry) => entry.sequencePosition === nextIndex)
-            || null;
-
-        return nextEntry?.id || null;
-    }
-
     async removeDirectMapFromRotation(mapName) {
         const rotation = await this.getDirectMapRotation();
         const mapIds = (rotation.result || []).map((entry) => entry.id);
@@ -560,7 +527,12 @@ class CRCONService {
             throw new Error('set_map_rotation requires at least one map name');
         }
 
-        const sequenceState = await this.getDirectSequenceState();
+        const sequenceResponse = await this.executeDirectCommand(
+            'GetServerInformation',
+            { Name: 'mapsequence', Value: '' },
+            'get_map_rotation'
+        );
+        const sequenceState = this.normalizeDirectSequenceState(sequenceResponse.result);
         const sequence = sequenceState.entries;
 
         if (sequence.length === 0) {
@@ -580,7 +552,11 @@ class CRCONService {
         const currentIndex = Number.isInteger(sequenceState.currentIndex)
             ? sequenceState.currentIndex
             : 0;
-        const nextIndex = this.getDirectNextSequencePosition(sequence, currentIndex);
+        const maxPosition = sequence.reduce(
+            (highestPosition, entry) => Math.max(highestPosition, entry.sequencePosition),
+            0
+        );
+        const nextIndex = currentIndex >= maxPosition ? 0 : currentIndex + 1;
         const existingIndex = this.findPreferredSequenceIndex(sequence, mapId, currentIndex);
 
         if (existingIndex === nextIndex) {
@@ -669,22 +645,6 @@ class CRCONService {
 
         const matchedMap = this.localMapCatalog.find((entry) => entry.id === mapId);
         return matchedMap ? { ...matchedMap, map: { ...matchedMap.map } } : null;
-    }
-
-    resolveObservedMapId(values = []) {
-        const canonicalMapId = this.resolveMapIdFromValues(values);
-        if (canonicalMapId) {
-            return canonicalMapId;
-        }
-
-        for (const value of values) {
-            const normalized = normalizeMapValue(value);
-            if (normalized) {
-                return normalized.replace(/\s+/g, '_');
-            }
-        }
-
-        return null;
     }
 
     normalizeMapCollection(rawValue) {
@@ -793,37 +753,25 @@ class CRCONService {
     }
 
     updateLocalMatchStateFromStatus(statusPayload) {
-        const currentMapId = this.resolveObservedMapId([
+        const currentMapId = this.resolveMapIdFromValues([
             statusPayload?.result?.map?.id,
             statusPayload?.result?.map?.pretty_name,
-            statusPayload?.result?.map?.name,
             statusPayload?.result?.current_map?.id,
             statusPayload?.result?.current_map?.pretty_name,
-            statusPayload?.result?.current_map?.name,
             statusPayload?.result?.raw?.mapId,
-            statusPayload?.result?.raw?.map_id,
-            statusPayload?.result?.raw?.MapId,
             statusPayload?.result?.raw?.mapName,
             statusPayload?.result?.raw?.MapName,
             statusPayload?.result?.raw?.CurrentMapName,
-            statusPayload?.result?.raw?.currentMap,
-            statusPayload?.result?.raw?.CurrentMap,
-            statusPayload?.result?.raw?.map
+            statusPayload?.result?.raw?.currentMap
         ]);
 
-        this.updateLocalMatchState(currentMapId);
-    }
-
-    updateLocalMatchState(currentMapId, matchStartEpochSeconds = null) {
         if (!currentMapId) {
             return;
         }
 
         if (!this.currentMatchMapId) {
             this.currentMatchMapId = currentMapId;
-            this.matchStartEpochMs = Number.isFinite(matchStartEpochSeconds)
-                ? matchStartEpochSeconds * 1000
-                : Date.now();
+            this.matchStartEpochMs = Date.now();
             return;
         }
 
@@ -842,302 +790,21 @@ class CRCONService {
             });
             this.localMapHistory = this.localMapHistory.slice(0, 10);
             this.currentMatchMapId = currentMapId;
-            this.matchStartEpochMs = Number.isFinite(matchStartEpochSeconds)
-                ? matchStartEpochSeconds * 1000
-                : Date.now();
-            return;
+            this.matchStartEpochMs = Date.now();
         }
-
-        if (Number.isFinite(matchStartEpochSeconds)) {
-            this.matchStartEpochMs = matchStartEpochSeconds * 1000;
-        }
-    }
-
-    normalizePublicInfoState(rawValue) {
-        const currentMap = rawValue?.current_map;
-        const nextMap = rawValue?.next_map;
-
-        const currentMapId = this.resolveObservedMapId([
-            currentMap?.map?.id,
-            currentMap?.id,
-            currentMap?.map?.pretty_name,
-            currentMap?.map?.name,
-            currentMap?.pretty_name,
-            currentMap?.name
-        ]);
-
-        const nextMapId = this.resolveObservedMapId([
-            nextMap?.map?.id,
-            nextMap?.id,
-            nextMap?.map?.pretty_name,
-            nextMap?.map?.name,
-            nextMap?.pretty_name,
-            nextMap?.name
-        ]);
-
-        const currentMapStart = currentMap?.start;
-        const matchStartEpochSeconds = typeof currentMapStart === 'number'
-            ? currentMapStart
-            : Number.isFinite(Date.parse(currentMapStart))
-                ? Math.floor(Date.parse(currentMapStart) / 1000)
-                : null;
-
-        return {
-            currentMapId,
-            nextMapId,
-            currentPlayers: rawValue?.player_count ?? rawValue?.playerCount ?? null,
-            gameActive: currentMapId ? Boolean(currentMap) : null,
-            matchStartEpochSeconds
-        };
-    }
-
-    normalizeGameStateState(rawValue) {
-        const value = rawValue?.result ?? rawValue;
-
-        if (typeof value === 'boolean') {
-            return { gameActive: value };
-        }
-
-        const objectCandidate = value && typeof value === 'object' ? value : null;
-        if (objectCandidate) {
-            const booleanFields = [
-                objectCandidate.game_active,
-                objectCandidate.gameActive,
-                objectCandidate.active,
-                objectCandidate.in_progress,
-                objectCandidate.inProgress,
-                objectCandidate.started,
-                objectCandidate.running
-            ];
-
-            for (const fieldValue of booleanFields) {
-                if (typeof fieldValue === 'boolean') {
-                    return { gameActive: fieldValue };
-                }
-            }
-
-            const stringFields = [
-                objectCandidate.state,
-                objectCandidate.status,
-                objectCandidate.phase,
-                objectCandidate.name,
-                objectCandidate.value
-            ];
-
-            for (const fieldValue of stringFields) {
-                const normalized = this.normalizeGameStateString(fieldValue);
-                if (normalized !== null) {
-                    return { gameActive: normalized };
-                }
-            }
-        }
-
-        const normalizedString = this.normalizeGameStateString(value);
-        return {
-            gameActive: normalizedString
-        };
-    }
-
-    normalizeGameStateString(value) {
-        if (typeof value !== 'string') {
-            return null;
-        }
-
-        const normalized = value.trim().toLowerCase();
-        if (!normalized) {
-            return null;
-        }
-
-        if (
-            normalized.includes('match ended') ||
-            normalized.includes('game over') ||
-            normalized.includes('round over') ||
-            normalized.includes('ended') ||
-            normalized.includes('postmatch') ||
-            normalized.includes('post_match') ||
-            normalized.includes('warmup') ||
-            normalized.includes('waiting')
-        ) {
-            return false;
-        }
-
-        if (
-            normalized.includes('match start') ||
-            normalized.includes('in progress') ||
-            normalized.includes('in_progress') ||
-            normalized.includes('playing') ||
-            normalized.includes('started') ||
-            normalized.includes('active') ||
-            normalized.includes('live')
-        ) {
-            return true;
-        }
-
-        return null;
-    }
-
-    async getPublicInfoState() {
-        if (!this.client) {
-            return null;
-        }
-
-        try {
-            const response = await this.client.get('/api/get_public_info');
-            return this.normalizePublicInfoState(response?.data?.result);
-        } catch (error) {
-            logger.warn(
-                `[CRCON ${this.serverName}] GET get_public_info failed during state sync: ${this.formatRequestError(error)}`
-            );
-            return null;
-        }
-    }
-
-    async getGameStateState() {
-        if (!this.client) {
-            return null;
-        }
-
-        try {
-            const response = await this.client.get('/api/get_gamestate');
-            return this.normalizeGameStateState(response?.data);
-        } catch (error) {
-            logger.warn(
-                `[CRCON ${this.serverName}] GET get_gamestate failed during state sync: ${this.formatRequestError(error)}`
-            );
-            return null;
-        }
-    }
-
-    findRotationIndexForMap(entries, mapId, preferredIndex = null, excludedIndexes = []) {
-        if (!mapId || !Array.isArray(entries) || entries.length === 0) {
-            return -1;
-        }
-
-        const excludedIndexSet = new Set(excludedIndexes.filter(Number.isInteger));
-        const matchingIndexes = entries
-            .map((entry, index) => ({ id: entry?.id, index }))
-            .filter((entry) => entry.id === mapId && !excludedIndexSet.has(entry.index))
-            .map((entry) => entry.index);
-
-        if (matchingIndexes.length === 0) {
-            return -1;
-        }
-
-        if (Number.isInteger(preferredIndex) && matchingIndexes.includes(preferredIndex)) {
-            return preferredIndex;
-        }
-
-        if (Number.isInteger(preferredIndex)) {
-            const nearestUpcomingIndex = matchingIndexes.find((index) => index > preferredIndex);
-            if (nearestUpcomingIndex !== undefined) {
-                return nearestUpcomingIndex;
-            }
-
-            const nearestPriorIndex = [...matchingIndexes].reverse().find((index) => index < preferredIndex);
-            if (nearestPriorIndex !== undefined) {
-                return nearestPriorIndex;
-            }
-        }
-
-        return matchingIndexes[0];
-    }
-
-    reconcileRotationStateWithLiveState(rotationState, publicInfoState) {
-        if (!rotationState || !Array.isArray(rotationState.entries) || rotationState.entries.length === 0 || !publicInfoState) {
-            return rotationState;
-        }
-
-        let currentIndex = rotationState.currentIndex;
-        let nextIndex = rotationState.nextIndex;
-
-        if (publicInfoState.currentMapId) {
-            const observedCurrentIndex = this.findRotationIndexForMap(
-                rotationState.entries,
-                publicInfoState.currentMapId,
-                currentIndex
-            );
-
-            if (observedCurrentIndex >= 0 && observedCurrentIndex !== currentIndex) {
-                logger.warn(
-                    `[CRCON ${this.serverName}] Rotation current_index ${currentIndex} is stale; using live current map ${publicInfoState.currentMapId} at index ${observedCurrentIndex}`
-                );
-                currentIndex = observedCurrentIndex;
-            }
-        }
-
-        if (publicInfoState.nextMapId) {
-            const observedNextIndex = this.findRotationIndexForMap(
-                rotationState.entries,
-                publicInfoState.nextMapId,
-                nextIndex,
-                [currentIndex]
-            );
-
-            if (observedNextIndex >= 0 && observedNextIndex !== nextIndex) {
-                logger.warn(
-                    `[CRCON ${this.serverName}] Rotation next_index ${nextIndex} is stale; using live next map ${publicInfoState.nextMapId} at index ${observedNextIndex}`
-                );
-                nextIndex = observedNextIndex;
-            }
-        }
-
-        if (!Number.isInteger(nextIndex) || nextIndex < 0 || nextIndex >= rotationState.entries.length || nextIndex === currentIndex) {
-            nextIndex = this.getWrappedNextIndex(currentIndex, rotationState.entries.length);
-        }
-
-        return {
-            ...rotationState,
-            currentIndex,
-            nextIndex
-        };
     }
 
     async getMatchSnapshot() {
-        const [status, publicInfoState, gameStateState] = await Promise.all([
-            this.getStatus(),
-            this.getPublicInfoState(),
-            this.getGameStateState()
-        ]);
-        const statusCurrentMapId = this.resolveObservedMapId([
-            status?.result?.map?.id,
-            status?.result?.map?.pretty_name,
-            status?.result?.map?.name,
-            status?.result?.current_map?.id,
-            status?.result?.current_map?.pretty_name,
-            status?.result?.current_map?.name,
-            status?.result?.raw?.mapId,
-            status?.result?.raw?.map_id,
-            status?.result?.raw?.MapId,
-            status?.result?.raw?.mapName,
-            status?.result?.raw?.MapName,
-            status?.result?.raw?.CurrentMapName,
-            status?.result?.raw?.currentMap,
-            status?.result?.raw?.CurrentMap,
-            status?.result?.raw?.map
-        ]);
-        const currentMapId = publicInfoState?.currentMapId || statusCurrentMapId || null;
-        let directNextMapId = null;
-
-        if (!publicInfoState?.nextMapId && this.hasDirectRconConfigured()) {
-            try {
-                const directSequenceState = await this.getDirectSequenceState();
-                directNextMapId = this.getDirectSequenceNextMapId(directSequenceState, currentMapId);
-            } catch (error) {
-                logger.warn(
-                    `[CRCON ${this.serverName}] Direct sequence read failed during match snapshot: ${error.message}`
-                );
-            }
-        }
-
-        if (currentMapId) {
-            this.updateLocalMatchState(currentMapId, publicInfoState?.matchStartEpochSeconds ?? null);
-        }
-
+        const status = await this.getStatus();
         return {
-            currentMapId,
-            nextMapId: publicInfoState?.nextMapId || directNextMapId || null,
-            currentPlayers: status?.result?.current_players ?? publicInfoState?.currentPlayers ?? 0,
-            gameActive: gameStateState?.gameActive ?? publicInfoState?.gameActive ?? Boolean(status?.result?.map || status?.result?.current_map),
+            currentMapId: this.resolveMapIdFromValues([
+                status?.result?.map?.id,
+                status?.result?.map?.pretty_name,
+                status?.result?.current_map?.id,
+                status?.result?.current_map?.pretty_name
+            ]),
+            currentPlayers: status?.result?.current_players ?? 0,
+            gameActive: Boolean(status?.result?.map || status?.result?.current_map),
             matchStartEpochSeconds: this.matchStartEpochMs
                 ? Math.floor(this.matchStartEpochMs / 1000)
                 : null
@@ -1173,50 +840,6 @@ class CRCONService {
 
     async getDetailedPlayers() {
         return this.get('get_detailed_players');
-    }
-
-    async queueNextMap(mapId) {
-        if (!mapId) {
-            throw new Error('queueNextMap requires a map ID');
-        }
-
-        const queueDirectNextMap = () => this.executeDirectEndpoint('post', 'set_map_rotation', { map_names: [mapId] });
-        const canUseDirectQueue = this.hasDirectRconConfigured() && this.isDirectFallbackEnabled();
-
-        if (this.transportMode === TRANSPORT_MODES.DIRECT_RCON) {
-            return queueDirectNextMap();
-        }
-
-        if (!this.hasApiConfigured()) {
-            if (canUseDirectQueue) {
-                return queueDirectNextMap();
-            }
-            throw new Error(`CRCON API is not configured for ${this.serverName}`);
-        }
-
-        if (this.transportMode === TRANSPORT_MODES.API_WITH_FALLBACK && this.isCrconCircuitOpen()) {
-            if (canUseDirectQueue) {
-                return queueDirectNextMap();
-            }
-        }
-
-        try {
-            const response = await this.queueNextMapViaApi(mapId);
-            if (this.transportMode === TRANSPORT_MODES.API_WITH_FALLBACK) {
-                this.recordApiSuccess();
-            }
-            return response;
-        } catch (error) {
-            if (this.transportMode !== TRANSPORT_MODES.API_WITH_FALLBACK || !canUseDirectQueue) {
-                throw error;
-            }
-
-            this.recordApiFailure(error);
-            logger.warn(
-                `[CRCON ${this.serverName}] Falling back to direct RCON for POST set_map_rotation`
-            );
-            return queueDirectNextMap();
-        }
     }
 
     async setNextMap(mapId) {
@@ -1273,122 +896,6 @@ class CRCONService {
 
     async getMapHistory() {
         return this.get('get_map_history');
-    }
-
-    normalizeRotationState(rawValue) {
-        if (rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue)) {
-            const maps = Array.isArray(rawValue.maps)
-                ? rawValue.maps
-                : Array.isArray(rawValue.Maps)
-                    ? rawValue.Maps
-                    : [];
-
-            if (maps.length > 0) {
-                const entries = maps.map((entry, index) => {
-                    const mapId = this.resolveMapIdFromValues([
-                        entry?.id,
-                        entry?.pretty_name,
-                        entry?.map?.id,
-                        entry?.map?.pretty_name,
-                        entry?.map?.name,
-                        entry
-                    ]);
-                    const normalizedMap = this.findMapById(mapId) || buildMapStub(
-                        mapId,
-                        entry?.pretty_name || entry?.map?.pretty_name || entry?.map?.name || String(entry)
-                    );
-
-                    return {
-                        ...normalizedMap,
-                        sequencePosition: index
-                    };
-                });
-
-                const parsedCurrentIndex = Number.parseInt(rawValue.current_index ?? rawValue.CurrentIndex, 10);
-                const parsedNextIndex = Number.parseInt(rawValue.next_index ?? rawValue.NextIndex, 10);
-                return {
-                    currentIndex: Number.isNaN(parsedCurrentIndex) ? 0 : parsedCurrentIndex,
-                    nextIndex: Number.isNaN(parsedNextIndex) ? null : parsedNextIndex,
-                    entries
-                };
-            }
-        }
-
-        const directSequence = this.normalizeDirectSequenceState(rawValue);
-        return {
-            currentIndex: directSequence.currentIndex,
-            nextIndex: null,
-            entries: directSequence.entries
-        };
-    }
-
-    getWrappedNextIndex(currentIndex, entryCount) {
-        if (!entryCount || entryCount <= 0) {
-            return 0;
-        }
-
-        if (!Number.isInteger(currentIndex) || currentIndex < 0) {
-            return 0;
-        }
-
-        return currentIndex >= entryCount - 1 ? 0 : currentIndex + 1;
-    }
-
-    getDirectNextSequencePosition(entries, currentIndex) {
-        if (!Array.isArray(entries) || entries.length === 0) {
-            return 0;
-        }
-
-        const maxPosition = entries.reduce(
-            (highestPosition, entry) => Math.max(highestPosition, entry.sequencePosition),
-            0
-        );
-
-        if (!Number.isInteger(currentIndex) || currentIndex < 0) {
-            return entries[0]?.sequencePosition ?? 0;
-        }
-
-        return currentIndex >= maxPosition ? 0 : currentIndex + 1;
-    }
-
-    buildRotationWithQueuedNextMap(entries, nextIndex, mapId) {
-        const existingMapIds = entries.map((entry) => entry.id).filter(Boolean);
-        const filteredMapIds = existingMapIds.filter((entryId) => entryId !== mapId);
-        const normalizedNextIndex = Math.min(Math.max(nextIndex, 0), filteredMapIds.length);
-
-        filteredMapIds.splice(normalizedNextIndex, 0, mapId);
-        return filteredMapIds;
-    }
-
-    async queueNextMapViaApi(mapId) {
-        try {
-            const [rotationResponse, publicInfoState] = await Promise.all([
-                this.client.get('/api/get_map_rotation'),
-                this.getPublicInfoState()
-            ]);
-            const rotationState = this.reconcileRotationStateWithLiveState(
-                this.normalizeRotationState(rotationResponse?.data?.result),
-                publicInfoState
-            );
-
-            const mapNames = rotationState.entries.length
-                ? this.buildRotationWithQueuedNextMap(
-                    rotationState.entries,
-                    Number.isInteger(rotationState.nextIndex)
-                        ? rotationState.nextIndex
-                        : this.getWrappedNextIndex(rotationState.currentIndex, rotationState.entries.length),
-                    mapId
-                )
-                : [mapId];
-
-            const response = await this.client.post('/api/set_map_rotation', { map_names: mapNames });
-            return response.data;
-        } catch (error) {
-            logger.error(
-                `[CRCON ${this.serverName}] queueNextMap failed: ${this.formatRequestError(error)}`
-            );
-            throw error;
-        }
     }
 
     async describeAutoModSoloTankConfig() {

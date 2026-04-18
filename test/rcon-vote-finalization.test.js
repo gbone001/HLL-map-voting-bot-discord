@@ -2,15 +2,6 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { MapVotingService } = require('../src/services/mapVoting');
 const { CRCONService, TRANSPORT_MODES } = require('../src/services/crcon');
-const queuedMapStore = require('../src/services/queuedMapStore');
-
-test.beforeEach(() => {
-    queuedMapStore.clearQueuedMap(1);
-});
-
-test.afterEach(() => {
-    queuedMapStore.clearQueuedMap(1);
-});
 
 function buildPollMessage(answerTexts) {
     return {
@@ -91,13 +82,6 @@ test('vote finalization in direct RCON mode moves an existing winner into the sl
     });
 
     const commands = [];
-    const liveState = {
-        currentMapId: 'foy_warfare',
-        nextMapId: 'kharkov_warfare',
-        currentPlayers: 85,
-        gameActive: true,
-        matchStartEpochSeconds: 7000
-    };
     crcon.hasDirectRconConfigured = () => true;
     crcon.executeDirectCommand = async (command, payload, endpoint) => {
         commands.push({ command, payload, endpoint });
@@ -118,13 +102,8 @@ test('vote finalization in direct RCON mode moves an existing winner into the sl
             };
         }
 
-        if (command === 'MoveMapInSequence') {
-            liveState.nextMapId = 'stmereeglise_warfare';
-        }
-
         return { result: { ok: true } };
     };
-    crcon.getMatchSnapshot = async () => ({ ...liveState });
 
     const service = buildVotingService(crcon);
 
@@ -155,13 +134,6 @@ test('vote finalization in direct RCON mode adds a missing winner into the slot 
     });
 
     const commands = [];
-    const liveState = {
-        currentMapId: 'foy_warfare',
-        nextMapId: 'kharkov_warfare',
-        currentPlayers: 85,
-        gameActive: true,
-        matchStartEpochSeconds: 7100
-    };
     crcon.hasDirectRconConfigured = () => true;
     crcon.executeDirectCommand = async (command, payload, endpoint) => {
         commands.push({ command, payload, endpoint });
@@ -180,13 +152,8 @@ test('vote finalization in direct RCON mode adds a missing winner into the slot 
             };
         }
 
-        if (command === 'AddMapToSequence') {
-            liveState.nextMapId = 'stmariedumont_warfare';
-        }
-
         return { result: { ok: true } };
     };
-    crcon.getMatchSnapshot = async () => ({ ...liveState });
 
     const service = buildVotingService(crcon);
     service.getResults = async () => [
@@ -223,34 +190,7 @@ test('vote finalization in fallback mode sends the voted winner through direct R
     });
 
     const commands = [];
-    const liveState = {
-        currentMapId: 'foy_warfare',
-        nextMapId: 'foy_warfare',
-        currentPlayers: 85,
-        gameActive: true,
-        matchStartEpochSeconds: 7200
-    };
     crcon.client = {
-        get: async (url) => {
-            if (url === '/api/get_map_rotation') {
-                return {
-                    data: {
-                        result: {
-                            maps: [
-                                { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare' },
-                                { id: 'foy_warfare', pretty_name: 'Foy Warfare' },
-                                { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare' },
-                                { id: 'kharkov_warfare', pretty_name: 'Kharkov Warfare' }
-                            ],
-                            current_index: 0,
-                            next_index: 1
-                        }
-                    }
-                };
-            }
-
-            throw new Error(`Unexpected GET ${url}`);
-        },
         post: async () => {
             const error = new Error('Request failed with status code 500');
             error.response = { status: 500, statusText: 'Internal Server Error', data: {} };
@@ -259,7 +199,6 @@ test('vote finalization in fallback mode sends the voted winner through direct R
         }
     };
     crcon.hasDirectRconConfigured = () => true;
-    crcon.getPublicInfoState = async () => ({ ...liveState });
     crcon.executeDirectCommand = async (command, payload, endpoint) => {
         commands.push({ command, payload, endpoint });
 
@@ -275,10 +214,6 @@ test('vote finalization in fallback mode sends the voted winner through direct R
                     ]
                 }
             };
-        }
-
-        if (command === 'AddMapToSequence') {
-            liveState.nextMapId = 'stmereeglise_warfare';
         }
 
         return { result: { ok: true } };
@@ -346,173 +281,6 @@ test('direct RCON next-map selection uses currentIndex instead of sequence posit
             command: 'AddMapToSequence',
             payload: { MapName: 'stmereeglise_warfare', Index: 11 },
             endpoint: 'set_map_rotation'
-        }
-    ]);
-});
-
-test('API queueNextMap preserves the existing rotation instead of collapsing it to one map', async () => {
-    const crcon = new CRCONService({
-        serverName: 'Test Server',
-        transportMode: TRANSPORT_MODES.API_ONLY,
-        crconUrl: 'http://example.invalid',
-        crconToken: 'token'
-    });
-
-    const getCalls = [];
-    const postCalls = [];
-    crcon.client = {
-        get: async (url) => {
-            getCalls.push(url);
-            if (url === '/api/get_map_rotation') {
-                return {
-                    data: {
-                        result: {
-                            maps: [
-                                { id: 'foy_warfare', pretty_name: 'Foy Warfare' },
-                                { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare' },
-                                { id: 'kharkov_warfare', pretty_name: 'Kharkov Warfare' }
-                            ],
-                            current_index: 0,
-                            next_index: 1
-                        }
-                    }
-                };
-            }
-
-            if (url === '/api/get_public_info') {
-                return {
-                    data: {
-                        result: {
-                            current_map: {
-                                map: {
-                                    id: 'foy_warfare',
-                                    pretty_name: 'Foy Warfare'
-                                },
-                                start: 1776401500
-                            },
-                            next_map: {
-                                map: {
-                                    id: 'utahbeach_warfare',
-                                    pretty_name: 'Utah Beach Warfare'
-                                }
-                            },
-                            player_count: 50
-                        }
-                    }
-                };
-            }
-
-            throw new Error(`Unexpected GET ${url}`);
-        },
-        post: async (url, payload) => {
-            postCalls.push({ url, payload });
-            return {
-                data: {
-                    result: {
-                        ok: true
-                    }
-                }
-            };
-        }
-    };
-
-    await crcon.queueNextMap('kharkov_warfare');
-
-    assert.deepEqual(getCalls, ['/api/get_map_rotation', '/api/get_public_info']);
-    assert.deepEqual(postCalls, [
-        {
-            url: '/api/set_map_rotation',
-            payload: {
-                map_names: ['foy_warfare', 'kharkov_warfare', 'utahbeach_warfare']
-            }
-        }
-    ]);
-});
-
-test('API queueNextMap reconciles stale rotation indexes against live public info', async () => {
-    const crcon = new CRCONService({
-        serverName: 'Test Server',
-        transportMode: TRANSPORT_MODES.API_ONLY,
-        crconUrl: 'http://example.invalid',
-        crconToken: 'token'
-    });
-
-    const getCalls = [];
-    const postCalls = [];
-    crcon.client = {
-        get: async (url) => {
-            getCalls.push(url);
-            if (url === '/api/get_map_rotation') {
-                return {
-                    data: {
-                        result: {
-                            maps: [
-                                { id: 'foy_warfare', pretty_name: 'Foy Warfare' },
-                                { id: 'foy_warfare_night', pretty_name: 'Foy Warfare (Night)' },
-                                { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare' },
-                                { id: 'stmereeglise_warfare', pretty_name: 'St. Mere Eglise Warfare' },
-                                { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare' }
-                            ],
-                            current_index: 3,
-                            next_index: 4
-                        }
-                    }
-                };
-            }
-
-            if (url === '/api/get_public_info') {
-                return {
-                    data: {
-                        result: {
-                            current_map: {
-                                map: {
-                                    id: 'omahabeach_warfare',
-                                    pretty_name: 'Omaha Beach Warfare'
-                                },
-                                start: 1776401600
-                            },
-                            next_map: {
-                                map: {
-                                    id: 'utahbeach_warfare',
-                                    pretty_name: 'Utah Beach Warfare'
-                                }
-                            },
-                            player_count: 89
-                        }
-                    }
-                };
-            }
-
-            throw new Error(`Unexpected GET ${url}`);
-        },
-        post: async (url, payload) => {
-            postCalls.push({ url, payload });
-            return {
-                data: {
-                    result: {
-                        ok: true
-                    }
-                }
-            };
-        }
-    };
-
-    await crcon.queueNextMap('carentan_warfare');
-
-    assert.deepEqual(getCalls, ['/api/get_map_rotation', '/api/get_public_info']);
-    assert.deepEqual(postCalls, [
-        {
-            url: '/api/set_map_rotation',
-            payload: {
-                map_names: [
-                    'foy_warfare',
-                    'foy_warfare_(night)',
-                    'omahabeach_warfare',
-                    'stmereeglise_warfare',
-                    'carentan_warfare',
-                    'utahbeach_warfare'
-                ]
-            }
         }
     ]);
 });
