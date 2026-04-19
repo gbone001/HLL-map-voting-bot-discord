@@ -144,6 +144,7 @@ class MapVotePanelService {
             let whitelistCount = 0;
             let totalMaps = 0;
             let mapHistory = [];
+            let liveDiscordVoteResults = null;
 
             try {
                 const [serverStatus, vmConfig, vmStatus, whitelist, allMaps, history] = await Promise.all([
@@ -166,6 +167,14 @@ class MapVotePanelService {
                 mapHistory = history?.result || [];
             } catch (e) {
                 logger.warn(`[MapVotePanel] Error fetching data: ${e.message}`);
+            }
+
+            if (config.voteActive && typeof mapVotingService.getResults === 'function') {
+                try {
+                    liveDiscordVoteResults = await mapVotingService.getResults();
+                } catch (error) {
+                    logger.warn(`[MapVotePanel] Error fetching live Discord poll results: ${error.message}`);
+                }
             }
 
             // Seeding Bot Status
@@ -199,14 +208,29 @@ class MapVotePanelService {
             }
 
             // Current Vote Status
-            if (votemapStatus) {
+            if (liveDiscordVoteResults) {
+                const totalVotes = liveDiscordVoteResults.reduce(
+                    (sum, [, voteCount]) => sum + (typeof voteCount === 'number' ? voteCount : 0),
+                    0
+                );
+                const leadingOption = liveDiscordVoteResults[0]?.[0] || 'None';
+                embed.addFields({
+                    name: '📊 Current Vote',
+                    value: `**Total Votes:** ${totalVotes}\n` +
+                           `**Selection:** ${leadingOption}\n` +
+                           `**Options:** ${liveDiscordVoteResults.length}\n` +
+                           `**Source:** Discord Poll`,
+                    inline: true
+                });
+            } else if (votemapStatus) {
                 const votes = votemapStatus.votes || {};
                 const totalVotes = Object.values(votes).reduce((a, b) => a + (typeof b === 'number' ? b : 0), 0);
                 embed.addFields({
                     name: '📊 Current Vote',
                     value: `**Total Votes:** ${totalVotes}\n` +
                            `**Selection:** ${votemapStatus.selection || 'None'}\n` +
-                           `**Options:** ${Object.keys(votes).length}`,
+                           `**Options:** ${Object.keys(votes).length}\n` +
+                           `**Source:** CRCON Votemap`,
                     inline: true
                 });
             }

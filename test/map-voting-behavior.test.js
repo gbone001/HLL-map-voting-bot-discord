@@ -483,6 +483,48 @@ test('vote finalization random fallback uses live poll options instead of stale 
     }
 });
 
+test('vote finalization uses the live Discord poll winner and queues that map', async () => {
+    const service = new MapVotingService(1);
+    let queuedMapId = null;
+
+    service.voteMessageId = 'poll-message-live-winner';
+    service.maps = [
+        { id: 'kursk_warfare', pretty_name: 'Kursk Warfare' },
+        { id: 'foy_warfare', pretty_name: 'Foy Warfare' }
+    ];
+    service.channel = {
+        messages: {
+            fetch: async () => ({
+                poll: {
+                    answers: new Map([
+                        ['1', { text: 'Omaha Beach Warfare', voteCount: 4 }],
+                        ['2', { text: 'Utah Beach Warfare', voteCount: 2 }],
+                        ['3', { text: 'Carentan Warfare', voteCount: 1 }]
+                    ])
+                }
+            })
+        }
+    };
+    service.crcon = {
+        queueNextMap: async (mapId) => {
+            queuedMapId = mapId;
+        }
+    };
+    service.getAllMaps = async () => ([
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Omaha Beach' } },
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Utah Beach' } },
+        { id: 'carentan_warfare', pretty_name: 'Carentan Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Carentan' } },
+        { id: 'kursk_warfare', pretty_name: 'Kursk Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Kursk' } }
+    ]);
+    service.getRecentExcludedMapIds = async () => new Set();
+    service.getCurrentMapId = async () => 'foy_warfare';
+
+    const mapId = await service.setVoteResult();
+
+    assert.equal(mapId, 'omahabeach_warfare');
+    assert.equal(queuedMapId, 'omahabeach_warfare');
+});
+
 test('vote finalization random fallback excludes the live current map when no votes were cast', async () => {
     const originalRandom = Math.random;
     const service = new MapVotingService(1);
@@ -598,6 +640,40 @@ test('non-seeded rotation avoids re-selecting the current map when alternatives 
 
         assert.equal(applied, true);
         assert.equal(selectedRotationMap, 'utahbeach_warfare');
+    } finally {
+        configManager.config = originalConfig;
+    }
+});
+
+test('non-seeded rotation returns false when verified queueing rejects the selected map', async () => {
+    const originalConfig = JSON.parse(JSON.stringify(configManager.config));
+    const service = new MapVotingService(1);
+
+    configManager.config.servers = {
+        ...configManager.config.servers,
+        1: {
+            ...(configManager.config.servers?.[1] || {}),
+            nonSeededMapList: ['utahbeach_warfare']
+        }
+    };
+
+    service.blacklist = [];
+    service.getAllMaps = async () => ([
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Omaha Beach' } },
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Utah Beach' } }
+    ]);
+    service.getRecentExcludedMapIds = async () => new Set(['omahabeach_warfare']);
+    service.getCurrentMapId = async () => 'omahabeach_warfare';
+    service.crcon = {
+        queueNextMap: async () => {
+            throw new Error('Queued next map mismatch: expected utahbeach_warfare but observed omahabeach_warfare via public-info');
+        }
+    };
+
+    try {
+        const applied = await service.applyNonSeededRotation();
+
+        assert.equal(applied, false);
     } finally {
         configManager.config = originalConfig;
     }

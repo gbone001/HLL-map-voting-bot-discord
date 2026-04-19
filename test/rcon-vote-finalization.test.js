@@ -425,3 +425,35 @@ test('queueNextMap throws when verified queued map does not match the requested 
         /Queued next map mismatch/
     );
 });
+
+test('queueNextMap throws in direct RCON mode when the next sequence slot does not become the requested map', async () => {
+    const crcon = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.DIRECT_RCON,
+        rconHost: '127.0.0.1',
+        rconPort: 27015,
+        rconPassword: 'secret'
+    });
+
+    crcon.hasDirectRconConfigured = () => true;
+    crcon.executeDirectCommand = async (command) => {
+        if (command === 'GetServerInformation') {
+            return {
+                result: {
+                    currentIndex: 10,
+                    MapSequence: [
+                        { MapName: 'Foy', MapId: 'foy_warfare', position: 10 },
+                        { MapName: 'Kharkov', MapId: 'kharkov_warfare', position: 11 }
+                    ]
+                }
+            };
+        }
+
+        return { result: { ok: true } };
+    };
+
+    await assert.rejects(
+        () => crcon.queueNextMap('stmereeglise_warfare'),
+        /Queued next map mismatch/
+    );
+});

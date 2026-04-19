@@ -176,6 +176,54 @@ test('API get_status normalizes alternative player-count field names', async () 
     assert.equal(response.result.current_map.id, 'omahabeach_warfare');
 });
 
+test('match snapshot prefers public-info current and next maps over stale get_status data', async () => {
+    const service = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_ONLY,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token'
+    });
+
+    service.currentMatchMapId = 'foy_warfare';
+    service.matchStartEpochMs = 1_776_590_400_000;
+    service.client = {
+        get: async (url) => {
+            if (url === '/api/get_status') {
+                return {
+                    data: {
+                        result: {
+                            current_players: 88,
+                            current_map: {
+                                id: 'stmereeglise_warfare',
+                                pretty_name: 'St. Mere Eglise Warfare'
+                            }
+                        }
+                    }
+                };
+            }
+
+            if (url === '/api/get_public_info') {
+                return {
+                    data: {
+                        result: {
+                            currentMapName: 'Omaha Beach Warfare',
+                            nextMapName: 'Utah Beach Warfare'
+                        }
+                    }
+                };
+            }
+
+            throw new Error(`Unexpected URL: ${url}`);
+        }
+    };
+
+    const snapshot = await service.getMatchSnapshot();
+
+    assert.equal(snapshot.currentMapId, 'omahabeach_warfare');
+    assert.equal(snapshot.nextMapId, 'utahbeach_warfare');
+    assert.equal(snapshot.currentPlayers, 88);
+});
+
 test('direct transport map catalog is warfare-only', async () => {
     const service = new CRCONService({
         serverName: 'Test Server',
@@ -351,6 +399,49 @@ test('blacklist panel shows explicit unsupported transport messaging', async () 
 
     assert.equal(response.embeds[0].data.title, '🚫 Blacklisted Maps');
     assert.match(response.embeds[0].data.description, /unavailable in the current transport mode/i);
+});
+
+test('control panel refresh prefers live Discord poll vote totals over CRCON votemap totals', async () => {
+    const panel = new MapVotePanelService();
+    const mapVotingService = {
+        getConfig: () => ({
+            voteActive: true,
+            seeded: true,
+            minimumPlayers: 50,
+            deactivatePlayers: 40,
+            mapsPerVote: 3,
+            nightMapCount: 0,
+            modeWeights: { warfare: 3, offensive: 0 },
+            excludeRecentMaps: 3,
+            activeSchedule: null,
+            pendingScheduleTransition: false
+        }),
+        getStatus: () => 'running',
+        getResults: async () => ([
+            ['Omaha Beach Warfare', 2],
+            ['Utah Beach Warfare', 1]
+        ])
+    };
+    const crconService = {
+        getStatus: async () => ({
+            result: {
+                current_players: 90,
+                map: { pretty_name: 'Foy Warfare' }
+            }
+        }),
+        getVotemapConfig: async () => ({ result: { enabled: true, default_method: 'random', num_options: 3, allow_opt_out: false } }),
+        getVotemapStatus: async () => ({ result: { votes: { old_option: 0 }, selection: 'None' } }),
+        getVotemapWhitelist: async () => ({ result: ['foy_warfare'] }),
+        getMaps: async () => ({ result: [{ id: 'foy_warfare' }, { id: 'omahabeach_warfare' }] }),
+        getMapHistory: async () => ({ result: [] })
+    };
+
+    const response = await panel.buildControlPanel(mapVotingService, crconService, 'Test Server');
+    const currentVoteField = response.embeds[0].data.fields.find((field) => field.name === '📊 Current Vote');
+
+    assert.match(currentVoteField.value, /\*\*Total Votes:\*\* 3/);
+    assert.match(currentVoteField.value, /\*\*Selection:\*\* Omaha Beach Warfare/);
+    assert.match(currentVoteField.value, /\*\*Source:\*\* Discord Poll/);
 });
 
 test('schedule export fails explicitly when CRCON whitelist is unavailable in direct transport', async () => {
