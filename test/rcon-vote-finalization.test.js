@@ -300,6 +300,42 @@ test('vote finalization in fallback mode sends the voted winner through direct R
     ]);
 });
 
+test('setVoteResult randomly selects one of the tied highest-vote maps', async () => {
+    const queuedMapIds = [];
+    const crcon = {
+        queueNextMap: async (mapId) => {
+            queuedMapIds.push(mapId);
+            return { ok: true };
+        }
+    };
+
+    const service = buildVotingService(crcon);
+    service.getResults = async () => [
+        ['St. Mere Eglise Warfare', 6],
+        ['Utah Beach Warfare', 6],
+        ['St. Marie Du Mont Warfare', 2]
+    ];
+
+    const originalRandom = Math.random;
+
+    try {
+        Math.random = () => 0;
+        const firstSelectedMapId = await service.setVoteResult();
+
+        Math.random = () => 0.999999;
+        const secondSelectedMapId = await service.setVoteResult();
+
+        assert.equal(firstSelectedMapId, 'stmereeglise_warfare');
+        assert.equal(secondSelectedMapId, 'utahbeach_warfare');
+        assert.deepEqual(queuedMapIds, [
+            'stmereeglise_warfare',
+            'utahbeach_warfare'
+        ]);
+    } finally {
+        Math.random = originalRandom;
+    }
+});
+
 test('direct RCON next-map selection uses currentIndex instead of sequence position zero', async () => {
     const crcon = new CRCONService({
         serverName: 'Test Server',
@@ -487,4 +523,73 @@ test('queueNextMap accepts direct RCON aliases that refer to the same queued map
     const result = await crcon.queueNextMap('stmariedumont_warfare');
 
     assert.equal(result.queuedState.nextMapId, 'stmariedumont_warfare');
+});
+
+test('queueNextMapAtSequenceStart moves the voted map to sequence position 0 for session-end queueing', async () => {
+    const crcon = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_WITH_FALLBACK,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token',
+        rconHost: '127.0.0.1',
+        rconPort: 27015,
+        rconPassword: 'secret'
+    });
+
+    const commands = [];
+    const sequenceState = {
+        currentIndex: 10,
+        MapSequence: [
+            { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 0 },
+            { MapName: 'Foy', MapId: 'foy_warfare', position: 9 },
+            { MapName: 'Omaha Beach', MapId: 'omahabeach_warfare', position: 10 },
+            { MapName: 'Kharkov', MapId: 'kharkov_warfare', position: 11 },
+            { MapName: 'St. Mere Eglise', MapId: 'stmereeglise_warfare', position: 15 }
+        ]
+    };
+
+    crcon.executeDirectCommand = async (command, payload, endpoint) => {
+        commands.push({ command, payload, endpoint });
+
+        if (command === 'GetServerInformation') {
+            return { result: sequenceState };
+        }
+
+        if (command === 'MoveMapInSequence') {
+            sequenceState.MapSequence = sequenceState.MapSequence
+                .map((entry) => {
+                    if (entry.position === payload.CurrentIndex) {
+                        return { ...entry, position: payload.NewIndex };
+                    }
+                    if (entry.position >= payload.NewIndex && entry.position < payload.CurrentIndex) {
+                        return { ...entry, position: entry.position + 1 };
+                    }
+                    return entry;
+                });
+            return { result: { ok: true } };
+        }
+
+        return { result: { ok: true } };
+    };
+
+    const result = await crcon.queueNextMapAtSequenceStart('stmereeglise_warfare');
+
+    assert.equal(result.queuedState.nextMapId, 'stmereeglise_warfare');
+    assert.deepEqual(commands, [
+        {
+            command: 'GetServerInformation',
+            payload: { Name: 'mapsequence', Value: '' },
+            endpoint: 'get_map_rotation'
+        },
+        {
+            command: 'MoveMapInSequence',
+            payload: { CurrentIndex: 15, NewIndex: 0 },
+            endpoint: 'set_map_rotation'
+        },
+        {
+            command: 'GetServerInformation',
+            payload: { Name: 'mapsequence', Value: '' },
+            endpoint: 'get_map_rotation'
+        }
+    ]);
 });

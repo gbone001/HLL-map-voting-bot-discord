@@ -94,11 +94,11 @@ class MapVotingService {
         this.statusBackoffUntil = 0;
         this.lastStatusFailureLogAt = 0;
         this.lastServerStatus = null;
-        this.lastObservedMatchMapId = null;
-        this.pendingMatchStartDetection = false;
+        this.lastVoteStartedForCurrentMapId = null;
         this.voteFinalizationInProgress = false;
         this.skipNextUnseededMatchEndRotation = false;
         this.pendingQueuedMapMaxHoldMs = 3 * 60 * 60 * 1000;
+        this.lastObservedSessionRemainingMatchTime = null;
     }
 
     // ==================== INITIALIZATION ====================
@@ -785,38 +785,6 @@ class MapVotingService {
 
     async getGameState() {
         try {
-            if (typeof this.crcon?.getMatchSnapshot === 'function') {
-                const snapshot = await this.crcon.getMatchSnapshot();
-                const currentMapId = snapshot?.currentMapId || null;
-
-                if (!currentMapId) {
-                    if (this.gameActive === null) {
-                        this.gameActive = false;
-                    }
-                    return this.gameActive;
-                }
-
-                if (!this.lastObservedMatchMapId) {
-                    this.lastObservedMatchMapId = currentMapId;
-                    this.gameActive = true;
-                    return this.gameActive;
-                }
-
-                if (this.lastObservedMatchMapId !== currentMapId) {
-                    this.lastObservedMatchMapId = currentMapId;
-                    this.pendingMatchStartDetection = true;
-                    this.gameActive = false;
-                    return this.gameActive;
-                }
-
-                if (this.pendingMatchStartDetection) {
-                    this.pendingMatchStartDetection = false;
-                }
-
-                this.gameActive = true;
-                return this.gameActive;
-            }
-
             const payload = {
                 end: 10000,
                 filter_action: ['MATCH ENDED', 'MATCH START'],
@@ -824,21 +792,30 @@ class MapVotingService {
                 inclusive_filter: true
             };
 
-            const response = await this.crcon.post('get_recent_logs', payload);
+            try {
+                const response = await this.crcon.post('get_recent_logs', payload);
 
-            if (!response || !response.result || !response.result.logs || response.result.logs.length === 0) {
-                if (this.gameActive === null) {
-                    this.gameActive = false;
+                if (response?.result?.logs?.length > 0) {
+                    const latestLog = response.result.logs[0];
+                    const logText = latestLog.raw || latestLog.message || '';
+
+                    if (logText.includes('MATCH START')) {
+                        this.gameActive = true;
+                        return this.gameActive;
+                    }
+
+                    if (logText.includes('MATCH ENDED')) {
+                        this.gameActive = false;
+                        return this.gameActive;
+                    }
                 }
-                return this.gameActive;
+            } catch (logError) {
+                logger.warn(
+                    `[MapVoting S${this.serverNum}] Falling back to snapshot-based game state detection because recent log lookup failed: ${logError.message}`
+                );
             }
 
-            const latestLog = response.result.logs[0];
-            const logText = latestLog.raw || latestLog.message || '';
-
-            if (logText.includes('MATCH START')) {
-                this.gameActive = true;
-            } else if (logText.includes('MATCH ENDED')) {
+            if (this.gameActive === null) {
                 this.gameActive = false;
             }
 
@@ -846,6 +823,43 @@ class MapVotingService {
         } catch (error) {
             logger.error(`[MapVoting S${this.serverNum}] Error getting game state:`, error.message);
             return this.gameActive;
+        }
+    }
+
+    async getDirectSessionTimerState() {
+        if (typeof this.crcon?.supportsDirectSessionPolling !== 'function' || !this.crcon.supportsDirectSessionPolling()) {
+            this.lastObservedSessionRemainingMatchTime = null;
+            return {
+                enabled: false,
+                timerExpired: false,
+                remainingMatchTime: null
+            };
+        }
+
+        try {
+            const sessionInfo = await this.crcon.getDirectSessionInfo();
+            const remainingMatchTime = Number.isInteger(sessionInfo?.remainingMatchTime)
+                ? sessionInfo.remainingMatchTime
+                : null;
+
+            this.lastObservedSessionRemainingMatchTime = remainingMatchTime;
+
+            return {
+                enabled: true,
+                timerExpired: remainingMatchTime === 0,
+                remainingMatchTime,
+                sessionInfo
+            };
+        } catch (error) {
+            logger.warn(
+                `[MapVoting S${this.serverNum}] Direct RCON session timer polling failed: ${error.message}`
+            );
+            return {
+                enabled: true,
+                timerExpired: false,
+                remainingMatchTime: null,
+                error
+            };
         }
     }
 
@@ -1042,7 +1056,8 @@ class MapVotingService {
             // Group by mode
             const mapsByMode = {
                 warfare: { day: [], night: [] },
-                offensive: { day: [], night: [] }
+                offensive: { day: [], night: [] },
+                skirmish: { day: [], night: [] }
             };
 
             for (const map of availableMaps) {
@@ -1059,28 +1074,27 @@ class MapVotingService {
             const usedMapIds = new Set();
             const dayMapsNeeded = this.mapsPerVote - this.nightMapCount;
 
-            // Warfare day maps
-            const shuffledWarfare = this.shuffleArray(mapsByMode.warfare.day);
-            for (let i = 0; i < this.modeWeights.warfare && i < shuffledWarfare.length && result.length < dayMapsNeeded; i++) {
-                const map = shuffledWarfare[i];
-                if (!usedMapIds.has(map.id)) {
-                    result.push(this.formatMapForVote(map));
-                    usedMapIds.add(map.id);
-                }
-            }
+            const shuffledDayMapsByMode = {
+                warfare: this.shuffleArray(mapsByMode.warfare.day),
+                offensive: this.shuffleArray(mapsByMode.offensive.day),
+                skirmish: this.shuffleArray(mapsByMode.skirmish.day)
+            };
 
-            // Offensive day maps
-            const shuffledOffensive = this.shuffleArray(mapsByMode.offensive.day);
-            for (let i = 0; i < this.modeWeights.offensive && i < shuffledOffensive.length && result.length < dayMapsNeeded; i++) {
-                const map = shuffledOffensive[i];
-                if (!usedMapIds.has(map.id)) {
-                    result.push(this.formatMapForVote(map));
-                    usedMapIds.add(map.id);
+            for (const mode of ['warfare', 'offensive', 'skirmish']) {
+                const weightedDayMaps = shuffledDayMapsByMode[mode];
+                const modeWeight = this.modeWeights[mode] || 0;
+
+                for (let i = 0; i < modeWeight && i < weightedDayMaps.length && result.length < dayMapsNeeded; i++) {
+                    const map = weightedDayMaps[i];
+                    if (!usedMapIds.has(map.id)) {
+                        result.push(this.formatMapForVote(map));
+                        usedMapIds.add(map.id);
+                    }
                 }
             }
 
             // Night maps
-            const allNightMaps = [...mapsByMode.warfare.night, ...mapsByMode.offensive.night]
+            const allNightMaps = [...mapsByMode.warfare.night, ...mapsByMode.offensive.night, ...mapsByMode.skirmish.night]
                 .filter(m => !usedMapIds.has(m.id));
             const nightMaps = this.shuffleArray(allNightMaps);
 
@@ -1091,7 +1105,11 @@ class MapVotingService {
 
             // Fill remaining slots with day maps if needed
             if (result.length < this.mapsPerVote) {
-                const remainingDay = [...shuffledWarfare, ...shuffledOffensive]
+                const remainingDay = [
+                    ...shuffledDayMapsByMode.warfare,
+                    ...shuffledDayMapsByMode.offensive,
+                    ...shuffledDayMapsByMode.skirmish
+                ]
                     .filter(m => !usedMapIds.has(m.id));
                 for (const map of remainingDay) {
                     if (result.length >= this.mapsPerVote) break;
@@ -1286,7 +1304,28 @@ class MapVotingService {
         }
     }
 
-    async setVoteResult() {
+    async getConfirmedCurrentMapIdForVoteStart() {
+        try {
+            const allMaps = await this.getAllMaps();
+            const currentMapId = await this.getCurrentMapId(allMaps);
+
+            if (!currentMapId) {
+                logger.warn(`[MapVoting S${this.serverNum}] Could not confirm live current map for vote-start gating`);
+                return null;
+            }
+
+            return currentMapId;
+        } catch (error) {
+            logger.warn(
+                `[MapVoting S${this.serverNum}] Failed to confirm live current map before starting vote: ${error.message}`
+            );
+            return null;
+        }
+    }
+
+    async setVoteResult(options = {}) {
+        const { queueStrategy = 'default' } = options;
+
         try {
             const allMaps = await this.getAllMaps();
             const recentMapIds = allMaps?.length > 0 ? await this.getRecentExcludedMapIds(allMaps) : new Set();
@@ -1319,9 +1358,19 @@ class MapVotingService {
                     `[MapVoting S${this.serverNum}] Vote finalization context: currentMap=${currentMapId || 'unknown'} recentExcluded=${recentExcludedSummary} selected=${mapId}`
                 );
 
-                logger.info(`[MapVoting S${this.serverNum}] Setting next map: ${mapId}`);
-                await this.crcon.queueNextMap(mapId);
-                this.setPendingQueuedMap(mapId, 'vote-result');
+                if (queueStrategy === 'direct-sequence-start') {
+                    if (typeof this.crcon?.queueNextMapAtSequenceStart !== 'function') {
+                        throw new Error('Direct RCON sequence-start queueing is not available');
+                    }
+
+                    logger.info(`[MapVoting S${this.serverNum}] Queueing next map from session timer at sequence position 0: ${mapId}`);
+                    await this.crcon.queueNextMapAtSequenceStart(mapId);
+                    this.setPendingQueuedMap(mapId, 'vote-result-session-zero');
+                } else {
+                    logger.info(`[MapVoting S${this.serverNum}] Setting next map: ${mapId}`);
+                    await this.crcon.queueNextMap(mapId);
+                    this.setPendingQueuedMap(mapId, 'vote-result');
+                }
             } else {
                 logger.warn(`[MapVoting S${this.serverNum}] Could not determine next map`);
             }
@@ -1335,7 +1384,7 @@ class MapVotingService {
 
     // ==================== VOTE CONTROL ====================
 
-    async startVote() {
+    async startVote(confirmedCurrentMapId = null) {
         if (this.destroyed) return;
         if (this.voteActive) return; // Already voting
 
@@ -1347,6 +1396,9 @@ class MapVotingService {
             const existingVote = await this.checkActiveVote();
             if (existingVote) {
                 // Already have a vote for this match, just resume
+                if (confirmedCurrentMapId) {
+                    this.lastVoteStartedForCurrentMapId = confirmedCurrentMapId;
+                }
                 logger.info(`[MapVoting S${this.serverNum}] Using existing vote for this match`);
                 return;
             }
@@ -1377,6 +1429,10 @@ class MapVotingService {
                 voteStore.setVote(this.voteMessageId, this.gameStart, this.serverNum, this.maps);
             }
 
+            if (confirmedCurrentMapId) {
+                this.lastVoteStartedForCurrentMapId = confirmedCurrentMapId;
+            }
+
             logger.info(`[MapVoting S${this.serverNum}] Vote started with ${this.maps.length} maps (gameStart: ${this.gameStart})`);
         } catch (error) {
             logger.error(`[MapVoting S${this.serverNum}] Error starting vote:`, error.message);
@@ -1384,7 +1440,12 @@ class MapVotingService {
         }
     }
 
-    async stopVote() {
+    async stopVote(options = {}) {
+        const {
+            keepVoteActiveOnFailure = false,
+            queueStrategy = 'default'
+        } = options;
+
         if (this.voteFinalizationInProgress) {
             logger.warn(`[MapVoting S${this.serverNum}] Vote finalization already in progress; skipping duplicate stopVote`);
             return null;
@@ -1430,7 +1491,7 @@ class MapVotingService {
                     );
                 }
             }
-            const finalizedMapId = await this.setVoteResult();
+            const finalizedMapId = await this.setVoteResult({ queueStrategy });
 
             if (finalizationClaimed) {
                 voteStore.completeVoteFinalization(
@@ -1454,7 +1515,13 @@ class MapVotingService {
             if (finalizationClaimed && gameStart) {
                 voteStore.releaseVoteFinalization(gameStart, this.serverNum, finalizationOwnerId);
             }
-            this.voteActive = false;
+            if (keepVoteActiveOnFailure) {
+                logger.warn(
+                    `[MapVoting S${this.serverNum}] Preserving active vote state so finalization can retry on the next polling tick`
+                );
+            } else {
+                this.voteActive = false;
+            }
             return null;
         } finally {
             this.voteFinalizationInProgress = false;
@@ -1476,6 +1543,7 @@ class MapVotingService {
 
             const previousGameActive = this.gameActive;
             await this.getGameState();
+            const directSessionTimerState = await this.getDirectSessionTimerState();
 
             // Detect match end
             const matchEnded = previousGameActive === true && this.gameActive === false;
@@ -1491,6 +1559,27 @@ class MapVotingService {
                 }
             }
 
+            const votingEnabled = this.voteMapActive;
+            let finalizedVoteThisTick = false;
+            const shouldFinalizeFromSessionTimer = directSessionTimerState.timerExpired && this.voteActive;
+
+            if (shouldFinalizeFromSessionTimer || (!this.gameActive && this.voteActive)) {
+                const queueStrategy = shouldFinalizeFromSessionTimer ? 'direct-sequence-start' : 'default';
+                const finalizationReason = shouldFinalizeFromSessionTimer
+                    ? 'Direct RCON session timer reached zero'
+                    : 'Match closure detected';
+
+                logger.info(`[MapVoting S${this.serverNum}] ${finalizationReason}, finalizing active vote...`);
+                const finalizedMapId = await this.stopVote({
+                    keepVoteActiveOnFailure: true,
+                    queueStrategy
+                });
+                if (finalizedMapId) {
+                    finalizedVoteThisTick = true;
+                }
+                this.lastReminderTime = null;
+            }
+
             const status = await this.getServerStatus();
             this.lastServerStatus = status;
             if (!status || !status.result) {
@@ -1501,8 +1590,6 @@ class MapVotingService {
 
             const currentPlayers = status.result.current_players || 0;
             const wasSeeded = this.seeded;
-            const votingEnabled = this.voteMapActive;
-            let finalizedVoteThisTick = false;
 
             if (currentPlayers >= this.minimumPlayers && !this.seeded) {
                 logger.info(`[MapVoting S${this.serverNum}] Server reached ${this.minimumPlayers} players!`);
@@ -1518,12 +1605,12 @@ class MapVotingService {
 
             if (justDroppedOutOfSeeded && this.voteActive) {
                 logger.info(`[MapVoting S${this.serverNum}] Seeded state lost while vote active, finalizing current vote`);
-                const finalizedMapId = await this.stopVote();
+                const finalizedMapId = await this.stopVote({ keepVoteActiveOnFailure: true });
                 if (finalizedMapId) {
                     this.skipNextUnseededMatchEndRotation = true;
+                    finalizedVoteThisTick = true;
                 }
                 this.lastReminderTime = null;
-                finalizedVoteThisTick = true;
             }
 
             if (votingEnabled && this.seeded) {
@@ -1533,25 +1620,32 @@ class MapVotingService {
                         return;
                     }
 
+                    const confirmedCurrentMapId = await this.getConfirmedCurrentMapIdForVoteStart();
+                    if (!confirmedCurrentMapId) {
+                        return;
+                    }
+
+                    if (this.lastVoteStartedForCurrentMapId === confirmedCurrentMapId) {
+                        logger.info(
+                            `[MapVoting S${this.serverNum}] Waiting for confirmed live map change before starting a new vote; current map is still ${confirmedCurrentMapId}`
+                        );
+                        return;
+                    }
+
                     logger.info(`[MapVoting S${this.serverNum}] Starting vote...`);
                     await this.clearAllMessages();
-                    await this.startVote();
+                    await this.startVote(confirmedCurrentMapId);
                     this.lastReminderTime = Date.now();
                     this.reminderCount = 0;
-                } else if (!this.gameActive && this.voteActive) {
-                    logger.info(`[MapVoting S${this.serverNum}] Game over, stopping vote...`);
-                    await this.stopVote();
-                    this.lastReminderTime = null;
                 }
 
                 if (!this.sendSeedingMessage) {
                     this.sendSeedingMessage = true;
                 }
             } else {
-                if (votingEnabled && this.sendSeedingMessage) {
+                if (votingEnabled && this.sendSeedingMessage && !this.voteActive) {
                     await this.clearAllMessages();
                     await this.sendSeedingMsg();
-                    this.voteActive = false;
                     this.sendSeedingMessage = false;
                 }
 
@@ -1657,6 +1751,8 @@ class MapVotingService {
         this.sendSeedingMessage = true;
         this.seeded = false;
         this.skipNextUnseededMatchEndRotation = false;
+        this.lastVoteStartedForCurrentMapId = null;
+        this.lastObservedSessionRemainingMatchTime = null;
     }
 
     getStatus() {

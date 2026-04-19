@@ -36,6 +36,86 @@ test('non-seeded rotation still applies on match end when voting is disabled', a
     assert.equal(seedingMessageCalls, 0);
 });
 
+test('match-end detection finalizes an active vote before status polling succeeds', async () => {
+    const service = new MapVotingService(1);
+    let stopVoteCalls = 0;
+    let nonSeededRotationCalls = 0;
+
+    service.voteMapActive = true;
+    service.seeded = true;
+    service.voteActive = true;
+    service.gameActive = true;
+    service.minimumPlayers = 50;
+    service.deactivatePlayers = 40;
+    service.applyScheduleSettings = async () => {};
+    service.getGameState = async () => {
+        service.gameActive = false;
+        return false;
+    };
+    service.crcon = {
+        getStatus: async () => {
+            throw new Error('Request failed with status code 500');
+        }
+    };
+    service.stopVote = async () => {
+        stopVoteCalls += 1;
+        service.voteActive = false;
+        return 'utahbeach_warfare';
+    };
+    service.applyNonSeededRotation = async () => {
+        nonSeededRotationCalls += 1;
+        return true;
+    };
+
+    await service.doMapVote();
+
+    assert.equal(stopVoteCalls, 1);
+    assert.equal(nonSeededRotationCalls, 0);
+    assert.equal(service.voteActive, false);
+});
+
+test('direct RCON session timer reaching zero finalizes an active vote with sequence-start queueing', async () => {
+    const service = new MapVotingService(1);
+    const stopVoteCalls = [];
+
+    service.voteMapActive = true;
+    service.seeded = true;
+    service.voteActive = true;
+    service.gameActive = true;
+    service.minimumPlayers = 50;
+    service.deactivatePlayers = 40;
+    service.applyScheduleSettings = async () => {};
+    service.getGameState = async () => true;
+    service.crcon = {
+        supportsDirectSessionPolling: () => true,
+        getDirectSessionInfo: async () => ({
+            remainingMatchTime: 0,
+            matchTime: 5400,
+            mapId: 'carentan_warfare'
+        }),
+        getStatus: async () => ({ result: { current_players: 70 } })
+    };
+    service.stopVote = async (options = {}) => {
+        stopVoteCalls.push(options);
+        service.voteActive = false;
+        return 'utahbeach_warfare';
+    };
+    service.clearAllMessages = async () => {};
+    service.startVote = async () => {
+        throw new Error('startVote should not run in the same tick as timer-zero finalization');
+    };
+
+    await service.doMapVote();
+
+    assert.deepEqual(stopVoteCalls, [
+        {
+            keepVoteActiveOnFailure: true,
+            queueStrategy: 'direct-sequence-start'
+        }
+    ]);
+    assert.equal(service.voteActive, false);
+});
+
 test('active vote is finalized when seeded state is lost mid-match', async () => {
     const service = new MapVotingService(1);
     let stopVoteCalls = 0;
@@ -70,6 +150,61 @@ test('active vote is finalized when seeded state is lost mid-match', async () =>
     assert.equal(service.seeded, false);
 });
 
+test('failed match-end finalization is retried on the next tick before any new vote starts', async () => {
+    const service = new MapVotingService(1);
+    let stopVoteCalls = 0;
+    let startVoteCalls = 0;
+    let seedingMessageCalls = 0;
+    let statusCallCount = 0;
+
+    service.voteMapActive = true;
+    service.seeded = true;
+    service.voteActive = true;
+    service.gameActive = true;
+    service.minimumPlayers = 50;
+    service.deactivatePlayers = 40;
+    service.applyScheduleSettings = async () => {};
+    service.getGameState = async () => {
+        service.gameActive = false;
+        return false;
+    };
+    service.crcon = {
+        getStatus: async () => {
+            statusCallCount += 1;
+            if (statusCallCount === 1) {
+                throw new Error('Request failed with status code 500');
+            }
+            return { result: { current_players: 10 } };
+        }
+    };
+    service.stopVote = async () => {
+        stopVoteCalls += 1;
+        if (stopVoteCalls === 1) {
+            service.voteActive = true;
+            return null;
+        }
+
+        service.voteActive = false;
+        return 'stmariedumont_warfare';
+    };
+    service.startVote = async () => {
+        startVoteCalls += 1;
+    };
+    service.clearAllMessages = async () => {};
+    service.sendSeedingMsg = async () => {
+        seedingMessageCalls += 1;
+    };
+
+    await service.doMapVote();
+    service.statusBackoffUntil = 0;
+    await service.doMapVote();
+
+    assert.equal(stopVoteCalls, 2);
+    assert.equal(startVoteCalls, 0);
+    assert.equal(seedingMessageCalls, 1);
+    assert.equal(service.voteActive, false);
+});
+
 test('non-seeded rotation does not overwrite a vote finalized during seeded drop at match end', async () => {
     const service = new MapVotingService(1);
     let stopVoteCalls = 0;
@@ -92,6 +227,7 @@ test('non-seeded rotation does not overwrite a vote finalized during seeded drop
     service.stopVote = async () => {
         stopVoteCalls += 1;
         service.voteActive = false;
+        return 'utahbeach_warfare';
     };
     service.clearAllMessages = async () => {};
     service.sendSeedingMsg = async () => {};
@@ -231,6 +367,56 @@ test('seeded polling clears an overwritten queued winner and allows a new vote',
     assert.equal(service.getPendingQueuedMap(), null);
 });
 
+test('getMapsToVote includes skirmish options when skirmish weight is enabled', async () => {
+    const service = new MapVotingService(1);
+    service.mapsPerVote = 4;
+    service.nightMapCount = 0;
+    service.modeWeights = {
+        warfare: 1,
+        offensive: 1,
+        skirmish: 1
+    };
+    service.blacklist = [];
+    service.getAllMaps = async () => ([
+        {
+            id: 'carentan_warfare',
+            pretty_name: 'Carentan Warfare',
+            game_mode: 'warfare',
+            environment: 'day',
+            map: { name: 'Carentan' }
+        },
+        {
+            id: 'stmereeglise_offensive_us',
+            pretty_name: 'St. Mere Eglise Offensive (US)',
+            game_mode: 'offensive',
+            environment: 'day',
+            map: { name: 'St. Mere Eglise' }
+        },
+        {
+            id: 'mortain_skirmish_overcast',
+            pretty_name: 'Mortain Skirmish (Overcast)',
+            game_mode: 'skirmish',
+            environment: 'overcast',
+            map: { name: 'Mortain' }
+        },
+        {
+            id: 'elsenbornridge_skirmish_night',
+            pretty_name: 'Elsenborn Ridge Skirmish (Night)',
+            game_mode: 'skirmish',
+            environment: 'night',
+            map: { name: 'Elsenborn Ridge' }
+        }
+    ]);
+    service.getRecentExcludedMapIds = async () => new Set();
+    service.getCurrentMapId = async () => 'foy_warfare';
+    service.getEffectiveWhitelist = async () => null;
+
+    const voteMaps = await service.getMapsToVote();
+    const voteMapIds = voteMaps.map((map) => map.id);
+
+    assert.ok(voteMapIds.includes('mortain_skirmish_overcast'));
+});
+
 test('get_status failures enter backoff and skip repeated polling attempts', async () => {
     const service = new MapVotingService(1);
     let statusCalls = 0;
@@ -276,40 +462,104 @@ test('successful get_status clears degraded mode after failure', async () => {
     assert.equal(service.statusBackoffUntil, 0);
 });
 
-test('match snapshot fallback detects a map change as a match boundary', async () => {
+test('getGameState uses MATCH ENDED and MATCH START log entries to detect round state', async () => {
     const service = new MapVotingService(1);
-    const snapshots = [
+    const recentLogResponses = [
         {
-            currentMapId: 'foy_warfare',
-            currentPlayers: 52,
-            gameActive: true,
-            matchStartEpochSeconds: 1000
+            result: {
+                logs: [
+                    { raw: '2026-04-20T07:00:00Z MATCH ENDED' }
+                ]
+            }
         },
         {
-            currentMapId: 'stmariedumont_warfare',
-            currentPlayers: 48,
-            gameActive: true,
-            matchStartEpochSeconds: 2000
-        },
-        {
-            currentMapId: 'stmariedumont_warfare',
-            currentPlayers: 48,
-            gameActive: true,
-            matchStartEpochSeconds: 2000
+            result: {
+                logs: [
+                    { raw: '2026-04-20T07:02:00Z MATCH START' }
+                ]
+            }
         }
     ];
 
     service.crcon = {
-        getMatchSnapshot: async () => snapshots.shift()
+        post: async (endpoint) => {
+            assert.equal(endpoint, 'get_recent_logs');
+            return recentLogResponses.shift();
+        }
     };
 
-    const firstTick = await service.getGameState();
-    const boundaryTick = await service.getGameState();
-    const resumedTick = await service.getGameState();
+    const endedTick = await service.getGameState();
+    const startedTick = await service.getGameState();
 
-    assert.equal(firstTick, true);
-    assert.equal(boundaryTick, false);
-    assert.equal(resumedTick, true);
+    assert.equal(endedTick, false);
+    assert.equal(startedTick, true);
+});
+
+test('seeded polling waits for a confirmed live map change before starting the next vote', async () => {
+    const service = new MapVotingService(1);
+    let startVoteCalls = 0;
+    let currentMapId = 'foy_warfare';
+
+    service.voteMapActive = true;
+    service.seeded = true;
+    service.voteActive = false;
+    service.gameActive = true;
+    service.minimumPlayers = 25;
+    service.deactivatePlayers = 10;
+    service.lastVoteStartedForCurrentMapId = 'foy_warfare';
+    service.applyScheduleSettings = async () => {};
+    service.getGameState = async () => true;
+    service.getAllMaps = async () => [];
+    service.getCurrentMapId = async () => currentMapId;
+    service.crcon = {
+        getStatus: async () => ({ result: { current_players: 40 } })
+    };
+    service.clearAllMessages = async () => {};
+    service.startVote = async () => {
+        startVoteCalls += 1;
+    };
+
+    await service.doMapVote();
+
+    currentMapId = 'utahbeach_warfare';
+    await service.doMapVote();
+
+    assert.equal(startVoteCalls, 1);
+});
+
+test('API-only transport does not use direct session timer polling for vote finalization', async () => {
+    const service = new MapVotingService(1);
+    let directSessionInfoCalls = 0;
+    let stopVoteCalls = 0;
+
+    service.voteMapActive = true;
+    service.seeded = true;
+    service.voteActive = true;
+    service.gameActive = true;
+    service.minimumPlayers = 50;
+    service.deactivatePlayers = 40;
+    service.applyScheduleSettings = async () => {};
+    service.getGameState = async () => true;
+    service.crcon = {
+        supportsDirectSessionPolling: () => false,
+        getDirectSessionInfo: async () => {
+            directSessionInfoCalls += 1;
+            return {
+                remainingMatchTime: 0
+            };
+        },
+        getStatus: async () => ({ result: { current_players: 60 } })
+    };
+    service.stopVote = async () => {
+        stopVoteCalls += 1;
+        return 'utahbeach_warfare';
+    };
+
+    await service.doMapVote();
+
+    assert.equal(directSessionInfoCalls, 0);
+    assert.equal(stopVoteCalls, 0);
+    assert.equal(service.voteActive, true);
 });
 
 test('duplicate vote finalization claims do not overwrite the first selected map', async () => {

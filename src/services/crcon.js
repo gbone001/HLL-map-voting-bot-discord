@@ -107,6 +107,10 @@ class CRCONService {
             this.transportMode === TRANSPORT_MODES.API_WITH_FALLBACK;
     }
 
+    supportsDirectSessionPolling() {
+        return this.isDirectFallbackEnabled() && this.hasDirectRconConfigured();
+    }
+
     supportsCapability(capability) {
         const supportMatrix = {
             get_status: true,
@@ -533,70 +537,144 @@ class CRCONService {
         return this.executeDirectCommand('RemoveMapFromRotation', { Index: index }, 'remove_map_from_rotation');
     }
 
-    async setDirectNextMap(mapNames) {
-        const mapId = Array.isArray(mapNames) ? mapNames[0] : null;
-        if (!mapId) {
-            throw new Error('set_map_rotation requires at least one map name');
-        }
-
+    async readDirectSequenceState() {
         const sequenceResponse = await this.executeDirectCommand(
             'GetServerInformation',
             { Name: 'mapsequence', Value: '' },
             'get_map_rotation'
         );
-        const sequenceState = this.normalizeDirectSequenceState(sequenceResponse.result);
+
+        return this.normalizeDirectSequenceState(sequenceResponse.result);
+    }
+
+    async moveDirectMapToSequenceIndex(mapId, targetIndex, endpoint = 'set_map_rotation', existingSequenceState = null) {
+        if (!mapId) {
+            throw new Error(`${endpoint} requires a map id`);
+        }
+
+        const sequenceState = existingSequenceState || await this.readDirectSequenceState();
         const sequence = sequenceState.entries;
 
         if (sequence.length === 0) {
             await this.executeDirectCommand(
                 'AddMapToSequence',
-                { MapName: mapId, Index: 0 },
-                'set_map_rotation'
+                { MapName: mapId, Index: targetIndex },
+                endpoint
             );
+
             return {
-                result: {
-                    map_names: [mapId],
-                    method: 'sequence-add-empty'
-                }
+                sequenceState,
+                action: 'sequence-add-empty'
             };
         }
 
         const currentIndex = Number.isInteger(sequenceState.currentIndex)
             ? sequenceState.currentIndex
             : 0;
-        const nextIndex = this.getDirectNextSequencePosition(sequenceState);
         const existingIndex = this.findPreferredSequenceIndex(sequence, mapId, currentIndex);
 
-        if (existingIndex === nextIndex) {
+        if (existingIndex === targetIndex) {
             return {
-                result: {
-                    map_names: [mapId],
-                    method: 'sequence-noop'
-                }
+                sequenceState,
+                action: 'sequence-noop'
             };
         }
 
         if (existingIndex >= 0) {
             await this.executeDirectCommand(
                 'MoveMapInSequence',
-                { CurrentIndex: existingIndex, NewIndex: nextIndex },
-                'set_map_rotation'
+                { CurrentIndex: existingIndex, NewIndex: targetIndex },
+                endpoint
             );
-        } else {
-            await this.executeDirectCommand(
-                'AddMapToSequence',
-                { MapName: mapId, Index: nextIndex },
-                'set_map_rotation'
-            );
+
+            return {
+                sequenceState,
+                action: 'sequence-move-existing'
+            };
         }
+
+        await this.executeDirectCommand(
+            'AddMapToSequence',
+            { MapName: mapId, Index: targetIndex },
+            endpoint
+        );
+
+        return {
+            sequenceState,
+            action: 'sequence-add-new'
+        };
+    }
+
+    async setDirectNextMap(mapNames) {
+        const mapId = Array.isArray(mapNames) ? mapNames[0] : null;
+        if (!mapId) {
+            throw new Error('set_map_rotation requires at least one map name');
+        }
+
+        const sequenceState = await this.readDirectSequenceState();
+        const currentIndex = Number.isInteger(sequenceState.currentIndex)
+            ? sequenceState.currentIndex
+            : 0;
+        const nextIndex = this.getDirectNextSequencePosition(sequenceState);
+        const moveResult = await this.moveDirectMapToSequenceIndex(
+            mapId,
+            nextIndex,
+            'set_map_rotation',
+            sequenceState
+        );
 
         return {
             result: {
                 map_names: [mapId],
-                method: 'sequence-next-index',
+                method: moveResult.action,
                 current_index: currentIndex,
                 next_index: nextIndex
             }
+        };
+    }
+
+    async getDirectSessionInfo() {
+        if (!this.supportsDirectSessionPolling()) {
+            throw createUnsupportedTransportError(
+                'match_tracking',
+                `Direct RCON session polling is not enabled for ${this.serverName}`
+            );
+        }
+
+        const response = await this.executeDirectCommand(
+            'GetServerInformation',
+            { Name: 'session', Value: '' },
+            'match_tracking'
+        );
+        const session = response.result || {};
+        const mapId = this.resolveMapIdFromValues([
+            session.mapId,
+            session.MapId,
+            session.mapName,
+            session.MapName,
+            session.CurrentMapName,
+            session.currentMap
+        ]);
+        const mapName = session.mapName || session.MapName || session.CurrentMapName || session.currentMap || null;
+
+        this.updateLocalMatchStateFromStatus({
+            result: {
+                map: this.findMapById(mapId) || buildMapStub(mapId, mapName),
+                current_map: this.findMapById(mapId) || buildMapStub(mapId, mapName),
+                raw: session
+            }
+        });
+
+        return {
+            serverName: session.serverName || session.ServerName || this.serverName,
+            mapId,
+            mapName,
+            gameMode: session.gameMode || session.GameMode || null,
+            remainingMatchTime: readInt(session.remainingMatchTime ?? session.RemainingMatchTime),
+            matchTime: readInt(session.matchTime ?? session.MatchTime),
+            alliedScore: readInt(session.alliedScore ?? session.AlliedScore),
+            axisScore: readInt(session.axisScore ?? session.AxisScore),
+            playerCount: readInt(session.playerCount ?? session.PlayerCount)
         };
     }
 
@@ -969,6 +1047,31 @@ class CRCONService {
         return {
             response,
             queuedState
+        };
+    }
+
+    async queueNextMapAtSequenceStart(mapId) {
+        if (!this.supportsDirectSessionPolling()) {
+            throw new Error(`Direct RCON sequence-start queueing is not enabled for ${this.serverName}`);
+        }
+
+        const response = await this.moveDirectMapToSequenceIndex(mapId, 0, 'set_map_rotation');
+        const sequenceState = await this.readDirectSequenceState();
+        const queuedEntry = sequenceState.entries.find((entry) => entry.sequencePosition === 0) || null;
+
+        if (!queuedEntry?.id || !this.areMapReferencesEquivalent(queuedEntry.id, mapId)) {
+            throw new Error(
+                `Queued next map mismatch at sequence position 0: expected ${mapId} but observed ${queuedEntry?.id || 'none'}`
+            );
+        }
+
+        return {
+            response,
+            queuedState: {
+                currentMapId: this.currentMatchMapId,
+                nextMapId: queuedEntry.id,
+                source: 'direct-sequence-position-0'
+            }
         };
     }
 
