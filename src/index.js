@@ -715,8 +715,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
             else if (customId === 'mapvote_settings' || customId.startsWith('mapvote_settings_')) {
                 await interaction.deferUpdate();
                 const generalSettings = await getLiveGeneralSettings(crcon, serverNum);
-                const panel = mapVotePanelService.buildSettingsPanel(service, generalSettings);
+                const catalogStatus = typeof crcon.getLocalMapCatalogStatus === 'function'
+                    ? crcon.getLocalMapCatalogStatus()
+                    : null;
+                const panel = mapVotePanelService.buildSettingsPanel(service, generalSettings, catalogStatus);
                 await updatePanelMessage(interaction, panel);
+            }
+
+            else if (customId === 'mapvote_sync_catalog' || customId.startsWith('mapvote_sync_catalog_')) {
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+                try {
+                    const syncResult = await crcon.syncLocalMapCatalogFromCrcon();
+                    service.clearCache();
+                    await interaction.editReply({
+                        content: `Local map catalog synced from CRCON. Entries: ${syncResult.entryCount}. Source: ${syncResult.source}.`
+                    });
+                } catch (error) {
+                    await interaction.editReply({
+                        content: `Failed to sync local map catalog: ${error.message}`
+                    });
+                }
             }
 
             else if (customId === 'mapvote_non_seeded_maps' || customId.startsWith('mapvote_non_seeded_maps_')) {

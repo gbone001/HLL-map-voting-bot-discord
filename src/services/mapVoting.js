@@ -10,6 +10,7 @@ const scheduleManager = require('./scheduleManager');
 const automodPresetManager = require('./automodPresetManager');
 const voteStore = require('./voteStore');
 const configManager = require('./configManager');
+const { hllMapCatalog } = require('./hllMapCatalog');
 
 class MapVotingService {
     constructor(serverNum = 1) {
@@ -97,6 +98,7 @@ class MapVotingService {
         this.pendingMatchStartDetection = false;
         this.voteFinalizationInProgress = false;
         this.skipNextUnseededMatchEndRotation = false;
+        this.pendingQueuedMapMaxHoldMs = 3 * 60 * 60 * 1000;
     }
 
     // ==================== INITIALIZATION ====================
@@ -144,6 +146,13 @@ class MapVotingService {
             return this.cachedMaps;
         }
 
+        const catalogStatus = hllMapCatalog.getCatalogStatus();
+        if (catalogStatus.hasRuntimeCatalog) {
+            this.cachedMaps = hllMapCatalog.getMaps();
+            this.cacheTime = now;
+            return this.cachedMaps;
+        }
+
         try {
             const response = await this.crcon.getMaps();
             if (response && response.result) {
@@ -154,6 +163,17 @@ class MapVotingService {
         } catch (error) {
             logger.error(`[MapVoting S${this.serverNum}] Error fetching maps:`, error.message);
         }
+
+        const bundledCatalogMaps = hllMapCatalog.getMaps();
+        if (bundledCatalogMaps.length > 0) {
+            logger.warn(
+                `[MapVoting S${this.serverNum}] Using bundled local map catalog because live getMaps was unavailable`
+            );
+            this.cachedMaps = bundledCatalogMaps;
+            this.cacheTime = now;
+            return this.cachedMaps;
+        }
+
         return this.cachedMaps || [];
     }
 
@@ -230,6 +250,86 @@ class MapVotingService {
             this.handleStatusFailure(error);
             return null;
         }
+    }
+
+    getPendingQueuedMapStateKey() {
+        return `pendingQueuedMap_${this.serverNum}`;
+    }
+
+    getPendingQueuedMap() {
+        return voteStore.getState(this.getPendingQueuedMapStateKey());
+    }
+
+    setPendingQueuedMap(mapId, source = 'unknown') {
+        if (!mapId) {
+            return;
+        }
+
+        voteStore.setState(this.getPendingQueuedMapStateKey(), {
+            mapId,
+            source,
+            queuedAt: Date.now()
+        });
+    }
+
+    clearPendingQueuedMap() {
+        voteStore.setState(this.getPendingQueuedMapStateKey(), null);
+    }
+
+    async shouldDeferNewVoteForQueuedWinner() {
+        const pendingQueuedMap = this.getPendingQueuedMap();
+        if (!pendingQueuedMap?.mapId) {
+            return false;
+        }
+
+        const allMaps = await this.getAllMaps();
+        const currentMapId = await this.getCurrentMapId(allMaps);
+        if (currentMapId === pendingQueuedMap.mapId) {
+            logger.info(
+                `[MapVoting S${this.serverNum}] Queued winner ${pendingQueuedMap.mapId} is now live; clearing pending guard`
+            );
+            this.clearPendingQueuedMap();
+            return false;
+        }
+
+        let queuedState = null;
+        if (typeof this.crcon?.readQueuedNextMapState === 'function') {
+            try {
+                queuedState = await this.crcon.readQueuedNextMapState();
+            } catch (error) {
+                logger.warn(
+                    `[MapVoting S${this.serverNum}] Could not verify pending queued winner ${pendingQueuedMap.mapId}: ${error.message}`
+                );
+            }
+        }
+
+        if (queuedState?.nextMapId === pendingQueuedMap.mapId) {
+            logger.info(
+                `[MapVoting S${this.serverNum}] Deferring new vote because queued winner ${pendingQueuedMap.mapId} is still pending`
+            );
+            return true;
+        }
+
+        if (queuedState?.nextMapId && queuedState.nextMapId !== pendingQueuedMap.mapId) {
+            logger.warn(
+                `[MapVoting S${this.serverNum}] Queued winner ${pendingQueuedMap.mapId} was overwritten externally by ${queuedState.nextMapId}; clearing pending guard`
+            );
+            this.clearPendingQueuedMap();
+            return false;
+        }
+
+        if ((Date.now() - pendingQueuedMap.queuedAt) > this.pendingQueuedMapMaxHoldMs) {
+            logger.warn(
+                `[MapVoting S${this.serverNum}] Pending queued winner ${pendingQueuedMap.mapId} exceeded hold window without verification; clearing pending guard`
+            );
+            this.clearPendingQueuedMap();
+            return false;
+        }
+
+        logger.info(
+            `[MapVoting S${this.serverNum}] Deferring new vote while queued winner ${pendingQueuedMap.mapId} awaits match transition`
+        );
+        return true;
     }
 
     // ==================== VOTE PERSISTENCE ====================
@@ -1077,6 +1177,7 @@ class MapVotingService {
             }
 
             await this.crcon.queueNextMap(selectedMap.id);
+            this.setPendingQueuedMap(selectedMap.id, 'non-seeded-rotation');
             logger.info(`[MapVoting S${this.serverNum}] Applied non-seeded rotation map: ${selectedMap.id}`);
             return true;
         } catch (error) {
@@ -1220,6 +1321,7 @@ class MapVotingService {
 
                 logger.info(`[MapVoting S${this.serverNum}] Setting next map: ${mapId}`);
                 await this.crcon.queueNextMap(mapId);
+                this.setPendingQueuedMap(mapId, 'vote-result');
             } else {
                 logger.warn(`[MapVoting S${this.serverNum}] Could not determine next map`);
             }
@@ -1426,6 +1528,11 @@ class MapVotingService {
 
             if (votingEnabled && this.seeded) {
                 if (this.gameActive && !this.voteActive) {
+                    const shouldDeferVote = await this.shouldDeferNewVoteForQueuedWinner();
+                    if (shouldDeferVote) {
+                        return;
+                    }
+
                     logger.info(`[MapVoting S${this.serverNum}] Starting vote...`);
                     await this.clearAllMessages();
                     await this.startVote();

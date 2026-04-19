@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
 const { getDataFilePath } = require('../utils/dataPath');
+const { hllMapCatalog } = require('./hllMapCatalog');
 
 const SCHEDULE_PATH = getDataFilePath('schedules.json');
 const SCHEDULE_BACKUP_PATH = `${SCHEDULE_PATH}.bak`;
@@ -62,6 +63,16 @@ function normalizeScheduleDays(days) {
 
     const normalizedDays = DAY_ORDER.filter(day => days.includes(day));
     return normalizedDays.length > 0 ? normalizedDays : [...DAY_PRESETS.all];
+}
+
+function normalizeScheduleWhitelist(whitelist) {
+    if (!Array.isArray(whitelist)) {
+        return null;
+    }
+
+    return hllMapCatalog.normalizeMapIds(whitelist, {
+        dropUnknown: false
+    });
 }
 
 class ScheduleManager {
@@ -149,7 +160,7 @@ class ScheduleManager {
                 nightMapCount: schedule.settings?.nightMapCount ?? 1
             },
             whitelist: Array.isArray(schedule.whitelist)
-                ? [...new Set(schedule.whitelist.filter(mapId => typeof mapId === 'string' && mapId.trim().length > 0))]
+                ? normalizeScheduleWhitelist(schedule.whitelist)
                 : null,
             generalSettings: {
                 ...createDefaultScheduleGeneralSettings(),
@@ -439,7 +450,9 @@ class ScheduleManager {
                 mapsPerVote: scheduleData.mapsPerVote ?? 6,
                 nightMapCount: scheduleData.nightMapCount ?? 1
             },
-            whitelist: scheduleData.whitelist || null, // null = use CRCON whitelist
+            whitelist: Array.isArray(scheduleData.whitelist)
+                ? normalizeScheduleWhitelist(scheduleData.whitelist)
+                : null, // null = use CRCON whitelist
             generalSettings: {
                 ...createDefaultScheduleGeneralSettings(),
                 ...(scheduleData.generalSettings || {})
@@ -488,7 +501,11 @@ class ScheduleManager {
         if (updates.settings !== undefined) {
             schedule.settings = { ...schedule.settings, ...updates.settings };
         }
-        if (updates.whitelist !== undefined) schedule.whitelist = updates.whitelist;
+        if (updates.whitelist !== undefined) {
+            schedule.whitelist = Array.isArray(updates.whitelist)
+                ? normalizeScheduleWhitelist(updates.whitelist)
+                : updates.whitelist;
+        }
         if (updates.generalSettings !== undefined) {
             schedule.generalSettings = {
                 ...createDefaultScheduleGeneralSettings(),

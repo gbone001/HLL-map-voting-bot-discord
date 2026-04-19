@@ -147,6 +147,90 @@ test('non-seeded rotation does not overwrite a vote finalized on seeded drop dur
     assert.equal(service.skipNextUnseededMatchEndRotation, false);
 });
 
+test('seeded polling defers starting a new vote while a queued winner is still pending', async () => {
+    const service = new MapVotingService(1);
+    let startVoteCalls = 0;
+    let pendingQueuedMap = {
+        mapId: 'foy_warfare',
+        source: 'vote-result',
+        queuedAt: Date.now()
+    };
+
+    service.voteMapActive = true;
+    service.seeded = true;
+    service.voteActive = false;
+    service.gameActive = true;
+    service.minimumPlayers = 25;
+    service.deactivatePlayers = 10;
+    service.applyScheduleSettings = async () => {};
+    service.getGameState = async () => true;
+    service.getAllMaps = async () => [];
+    service.getCurrentMapId = async () => 'carentan_warfare';
+    service.crcon = {
+        getStatus: async () => ({ result: { current_players: 40 } }),
+        readQueuedNextMapState: async () => ({
+            currentMapId: 'carentan_warfare',
+            nextMapId: 'foy_warfare',
+            source: 'public-info'
+        })
+    };
+    service.clearAllMessages = async () => {};
+    service.startVote = async () => {
+        startVoteCalls += 1;
+    };
+    service.getPendingQueuedMap = () => pendingQueuedMap;
+    service.clearPendingQueuedMap = () => {
+        pendingQueuedMap = null;
+    };
+
+    await service.doMapVote();
+
+    assert.equal(startVoteCalls, 0);
+    assert.equal(service.getPendingQueuedMap().mapId, 'foy_warfare');
+});
+
+test('seeded polling clears an overwritten queued winner and allows a new vote', async () => {
+    const service = new MapVotingService(1);
+    let startVoteCalls = 0;
+    let pendingQueuedMap = {
+        mapId: 'foy_warfare',
+        source: 'vote-result',
+        queuedAt: Date.now()
+    };
+
+    service.voteMapActive = true;
+    service.seeded = true;
+    service.voteActive = false;
+    service.gameActive = true;
+    service.minimumPlayers = 25;
+    service.deactivatePlayers = 10;
+    service.applyScheduleSettings = async () => {};
+    service.getGameState = async () => true;
+    service.getAllMaps = async () => [];
+    service.getCurrentMapId = async () => 'carentan_warfare';
+    service.crcon = {
+        getStatus: async () => ({ result: { current_players: 40 } }),
+        readQueuedNextMapState: async () => ({
+            currentMapId: 'carentan_warfare',
+            nextMapId: 'omahabeach_warfare',
+            source: 'public-info'
+        })
+    };
+    service.clearAllMessages = async () => {};
+    service.startVote = async () => {
+        startVoteCalls += 1;
+    };
+    service.getPendingQueuedMap = () => pendingQueuedMap;
+    service.clearPendingQueuedMap = () => {
+        pendingQueuedMap = null;
+    };
+
+    await service.doMapVote();
+
+    assert.equal(startVoteCalls, 1);
+    assert.equal(service.getPendingQueuedMap(), null);
+});
+
 test('get_status failures enter backoff and skip repeated polling attempts', async () => {
     const service = new MapVotingService(1);
     let statusCalls = 0;

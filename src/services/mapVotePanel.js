@@ -293,12 +293,14 @@ class MapVotePanelService {
                 });
             }
 
+            const currentMapSummary = String(currentMap || 'Unknown').substring(0, 100);
             embed.setDescription(
                 'Control map voting settings, manage whitelist/blacklist, and configure voting behavior.\n\n' +
                 '**Quick Actions:**\n' +
                 '• Toggle map voting on/off\n' +
                 '• Manage map whitelist\n' +
-                '• Configure voting thresholds'
+                '• Configure voting thresholds\n\n' +
+                `**Current Map:** ${currentMapSummary}`
             );
 
             embed.setFooter({ text: 'HLL Map Vote Bot • Use the buttons below to manage' });
@@ -678,12 +680,18 @@ class MapVotePanelService {
     /**
      * Build settings panel
      */
-    buildSettingsPanel(mapVotingService, generalSettings = {}) {
+    buildSettingsPanel(mapVotingService, generalSettings = {}, catalogStatus = null) {
         const config = mapVotingService.getConfig();
         const teamSwitchCooldown = generalSettings.teamSwitchCooldown;
         const idleAutokickTime = generalSettings.idleAutokickTime;
         const maxPingAutokick = generalSettings.maxPingAutokick;
         const nonSeededMapListCount = config.nonSeededMapListCount || 0;
+        const localCatalogStatus = catalogStatus || {
+            source: 'unknown',
+            entryCount: 0,
+            syncedAt: null,
+            hasRuntimeCatalog: false
+        };
 
         const embed = new EmbedBuilder()
             .setTitle('⚙️ Map Vote Settings')
@@ -722,11 +730,19 @@ class MapVotePanelService {
                 value:
                     `**Saved Maps:** ${nonSeededMapListCount}\n` +
                     '**Used When:** Server is below seeded threshold and no vote is running'
+            },
+            {
+                name: '🗂️ Local Map Catalog',
+                value:
+                    `**Source:** ${localCatalogStatus.source}\n` +
+                    `**Entries:** ${localCatalogStatus.entryCount}\n` +
+                    `**Last Sync:** ${localCatalogStatus.syncedAt || 'Never'}`
             }
         );
 
         embed.setDescription(
             'Configure Seeding Bot voting behavior.\n\n' +
+            'The local map catalog can act as the master map list for schedules, vote options, and queued next-map IDs once it has been synced from CRCON.\n\n' +
             'Click a button below to edit a setting.'
         );
 
@@ -773,10 +789,15 @@ class MapVotePanelService {
                 .setCustomId('mapvote_non_seeded_maps')
                 .setLabel('Non-Seeded Map List')
                 .setEmoji('🔄')
-                .setStyle(ButtonStyle.Secondary),
+                .setStyle(ButtonStyle.Secondary)
         );
 
         const row3 = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId('mapvote_sync_catalog')
+                .setLabel('Sync Maps From CRCON')
+                .setEmoji('🗂️')
+                .setStyle(ButtonStyle.Success),
             new ButtonBuilder()
                 .setCustomId('mapvote_back')
                 .setLabel('Back to Main')

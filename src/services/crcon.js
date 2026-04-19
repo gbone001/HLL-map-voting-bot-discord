@@ -10,7 +10,7 @@
 const axios = require('axios');
 const logger = require('../utils/logger');
 const { HLLRconClient } = require('./hllRconClient');
-const { WARFARE_MAP_CATALOG } = require('./hllMapCatalog');
+const { hllMapCatalog } = require('./hllMapCatalog');
 
 const TRANSPORT_MODES = {
     API_ONLY: 'crcon-api',
@@ -46,7 +46,7 @@ class CRCONService {
             password: this.rconPassword
         });
 
-        this.localMapCatalog = WARFARE_MAP_CATALOG.map((map) => ({ ...map, map: { ...map.map } }));
+        this.localMapCatalog = this.loadLocalMapCatalog();
         this.mapLookup = this.buildMapLookup(this.localMapCatalog);
         this.localMapHistory = [];
         this.currentMatchMapId = null;
@@ -90,6 +90,16 @@ class CRCONService {
 
     hasDirectRconConfigured() {
         return this.directClient.isConfigured();
+    }
+
+    loadLocalMapCatalog() {
+        return hllMapCatalog.getMaps().map((map) => ({ ...map, map: { ...map.map } }));
+    }
+
+    refreshLocalMapCatalog() {
+        this.localMapCatalog = this.loadLocalMapCatalog();
+        this.mapLookup = this.buildMapLookup(this.localMapCatalog);
+        return this.localMapCatalog;
     }
 
     isDirectFallbackEnabled() {
@@ -618,7 +628,7 @@ class CRCONService {
                 map.pretty_name?.replace(/\s+warfare$/i, '')
             ]) {
                 const normalized = normalizeMapValue(alias);
-                if (normalized) {
+                if (normalized && !lookup.has(normalized)) {
                     lookup.set(normalized, map.id);
                 }
             }
@@ -634,6 +644,32 @@ class CRCONService {
             }
         }
         return null;
+    }
+
+    resolveCanonicalMapId(value) {
+        if (!value) {
+            return null;
+        }
+
+        if (this.localMapCatalog.some((entry) => entry.id === value)) {
+            return value;
+        }
+
+        return this.resolveMapIdFromValues([value]);
+    }
+
+    areMapReferencesEquivalent(leftValue, rightValue) {
+        if (!leftValue || !rightValue) {
+            return false;
+        }
+
+        const leftCanonical = this.resolveCanonicalMapId(leftValue);
+        const rightCanonical = this.resolveCanonicalMapId(rightValue);
+        if (leftCanonical && rightCanonical) {
+            return leftCanonical === rightCanonical;
+        }
+
+        return normalizeLooseMapIdentity(leftValue) === normalizeLooseMapIdentity(rightValue);
     }
 
     findMapById(mapId) {
@@ -920,7 +956,7 @@ class CRCONService {
         this.assertCommandSucceeded(response, 'set_map_rotation');
 
         const queuedState = await this.readQueuedNextMapState();
-        if (queuedState?.nextMapId && queuedState.nextMapId !== mapId) {
+        if (queuedState?.nextMapId && !this.areMapReferencesEquivalent(queuedState.nextMapId, mapId)) {
             throw new Error(
                 `Queued next map mismatch: expected ${mapId} but observed ${queuedState.nextMapId} via ${queuedState.source}`
             );
@@ -936,6 +972,22 @@ class CRCONService {
         };
     }
 
+    getLocalMapCatalogStatus() {
+        return hllMapCatalog.getCatalogStatus();
+    }
+
+    async syncLocalMapCatalogFromCrcon() {
+        if (!this.client) {
+            throw new Error('CRCON API is not configured for catalog sync');
+        }
+
+        const response = await this.client.get('/api/get_maps');
+        const syncedStatus = hllMapCatalog.syncFromCrconMaps(response?.data?.result || []);
+        this.refreshLocalMapCatalog();
+
+        return syncedStatus;
+    }
+
     assertCommandSucceeded(response, endpoint) {
         if (response && typeof response === 'object' && response.failed === true) {
             const err = response.error || `CRCON command ${endpoint} returned failed=true`;
@@ -944,7 +996,24 @@ class CRCONService {
     }
 
     async getMaps() {
-        return this.get('get_maps');
+        const catalogStatus = this.getLocalMapCatalogStatus();
+        if (catalogStatus.hasRuntimeCatalog) {
+            return { result: this.loadLocalMapCatalog() };
+        }
+
+        try {
+            return await this.get('get_maps');
+        } catch (error) {
+            const localCatalog = this.loadLocalMapCatalog();
+            if (localCatalog.length > 0) {
+                logger.warn(
+                    `[CRCON ${this.serverName}] Falling back to bundled local map catalog because get_maps failed: ${error.message}`
+                );
+                return { result: localCatalog };
+            }
+
+            throw error;
+        }
     }
 
     async getMapRotation() {
@@ -1138,7 +1207,33 @@ function normalizeMapValue(value) {
     if (value === undefined || value === null) {
         return null;
     }
-    return String(value).trim().toLowerCase();
+    return String(value)
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .trim()
+        .toLowerCase()
+        .replace(/\bsaint(e)?\b/g, 'st')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+}
+
+function normalizeLooseMapIdentity(value) {
+    const normalized = normalizeMapValue(value);
+    if (!normalized) {
+        return null;
+    }
+
+    return normalized
+        .replace(/\bwarfare\b/g, ' ')
+        .replace(/\boffensive\b/g, ' ')
+        .replace(/\bskirmish\b/g, ' ')
+        .replace(/\bday\b/g, ' ')
+        .replace(/\bnight\b/g, ' ')
+        .replace(/\bv\s*2\b/g, ' ')
+        .replace(/\bl\b/g, ' ')
+        .replace(/\b19\d{2}\b/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
 }
 
 function buildMapStub(mapId, displayName = null) {

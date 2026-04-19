@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const logger = require('../utils/logger');
 const { getDataFilePath } = require('../utils/dataPath');
+const { hllMapCatalog } = require('./hllMapCatalog');
 
 const CONFIG_PATH = getDataFilePath('config.json');
 
@@ -79,7 +80,9 @@ class ConfigManager {
 
     getNonSeededMapList(serverNum) {
         const serverConfig = this.getServerConfig(serverNum);
-        return Array.isArray(serverConfig?.nonSeededMapList) ? [...serverConfig.nonSeededMapList] : [];
+        return hllMapCatalog.normalizeMapIds(serverConfig?.nonSeededMapList || [], {
+            dropUnknown: false
+        });
     }
 
     setServerConfig(serverNum, config) {
@@ -118,9 +121,10 @@ class ConfigManager {
 
     setNonSeededMapList(serverNum, mapList) {
         const current = this.config.servers[serverNum] || {};
+        const normalizedMapList = hllMapCatalog.normalizeMapIds(mapList || []);
         this.config.servers[serverNum] = {
             ...current,
-            nonSeededMapList: Array.isArray(mapList) ? [...new Set(mapList)] : [],
+            nonSeededMapList: normalizedMapList,
             updatedAt: new Date().toISOString()
         };
         this.config.setupComplete = true;
@@ -197,7 +201,9 @@ class ConfigManager {
             apiConfigured,
             rconConfigured,
             excludePlayedMapForXvotes,
-            nonSeededMapList: Array.isArray(saved?.nonSeededMapList) ? [...saved.nonSeededMapList] : []
+            nonSeededMapList: hllMapCatalog.normalizeMapIds(saved?.nonSeededMapList || [], {
+                dropUnknown: false
+            })
         };
     }
 }

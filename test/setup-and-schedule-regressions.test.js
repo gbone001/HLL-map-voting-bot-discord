@@ -623,6 +623,16 @@ test('index entrypoint routes schedule priority editing through selection and mo
     assert.match(fileContent, /Priority must be a whole number between 0 and 100\./);
 });
 
+test('both entrypoints expose the manual local map catalog sync action', () => {
+    const primaryEntry = fs.readFileSync(path.join(__dirname, '..', 'src', 'index.js'), 'utf8');
+    const desktopEntry = fs.readFileSync(path.join(__dirname, '..', 'src', 'index-AMD-desktop.js'), 'utf8');
+
+    assert.match(primaryEntry, /mapvote_sync_catalog/);
+    assert.match(primaryEntry, /syncLocalMapCatalogFromCrcon/);
+    assert.match(desktopEntry, /mapvote_sync_catalog/);
+    assert.match(desktopEntry, /syncLocalMapCatalogFromCrcon/);
+});
+
 test('index entrypoint validates schedule day preset updates before reporting success', () => {
     const filePath = path.join(__dirname, '..', 'src', 'index.js');
     const fileContent = fs.readFileSync(filePath, 'utf8');

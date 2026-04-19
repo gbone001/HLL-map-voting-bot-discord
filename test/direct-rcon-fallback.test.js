@@ -444,6 +444,43 @@ test('control panel refresh prefers live Discord poll vote totals over CRCON vot
     assert.match(currentVoteField.value, /\*\*Source:\*\* Discord Poll/);
 });
 
+test('control panel description shows the current live map after quick actions', async () => {
+    const panel = new MapVotePanelService();
+    const mapVotingService = {
+        getConfig: () => ({
+            voteActive: false,
+            seeded: true,
+            minimumPlayers: 50,
+            deactivatePlayers: 40,
+            mapsPerVote: 3,
+            nightMapCount: 1,
+            modeWeights: { warfare: 50, offensive: 50 },
+            excludeRecentMaps: 3,
+            activeSchedule: null,
+            pendingScheduleTransition: false
+        }),
+        getStatus: () => 'running'
+    };
+    const crconService = {
+        getStatus: async () => ({
+            result: {
+                current_players: 72,
+                map: { pretty_name: 'St. Mere Eglise Warfare' }
+            }
+        }),
+        getVotemapConfig: async () => ({ result: null }),
+        getVotemapStatus: async () => ({ result: null }),
+        getVotemapWhitelist: async () => ({ result: [] }),
+        getMaps: async () => ({ result: [] }),
+        getMapHistory: async () => ({ result: [] })
+    };
+
+    const response = await panel.buildControlPanel(mapVotingService, crconService, 'Test Server');
+
+    assert.match(response.embeds[0].data.description, /\*\*Quick Actions:\*\*/);
+    assert.match(response.embeds[0].data.description, /\*\*Current Map:\*\* St\. Mere Eglise Warfare/);
+});
+
 test('schedule export fails explicitly when CRCON whitelist is unavailable in direct transport', async () => {
     const originalData = scheduleManager.data;
     scheduleManager.data = {

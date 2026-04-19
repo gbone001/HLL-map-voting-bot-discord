@@ -457,3 +457,34 @@ test('queueNextMap throws in direct RCON mode when the next sequence slot does n
         /Queued next map mismatch/
     );
 });
+
+test('queueNextMap accepts direct RCON aliases that refer to the same queued map', async () => {
+    const crcon = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.DIRECT_RCON,
+        rconHost: '127.0.0.1',
+        rconPort: 27015,
+        rconPassword: 'secret'
+    });
+
+    crcon.hasDirectRconConfigured = () => true;
+    crcon.executeDirectCommand = async (command) => {
+        if (command === 'GetServerInformation') {
+            return {
+                result: {
+                    currentIndex: 10,
+                    MapSequence: [
+                        { MapName: 'Foy', MapId: 'foy_warfare', position: 10 },
+                        { MapName: 'Sainte-Marie-du-Mont', position: 11 }
+                    ]
+                }
+            };
+        }
+
+        return { result: { ok: true } };
+    };
+
+    const result = await crcon.queueNextMap('stmariedumont_warfare');
+
+    assert.equal(result.queuedState.nextMapId, 'stmariedumont_warfare');
+});
