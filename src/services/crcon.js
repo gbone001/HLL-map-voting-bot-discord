@@ -384,6 +384,8 @@ class CRCONService {
             result: parsedBody
         };
 
+        this.assertCommandSucceeded(parsedBody, endpoint);
+
         if (endpoint === 'get_status') {
             this.updateLocalMatchStateFromStatus(normalizedResponse);
         }
@@ -552,11 +554,7 @@ class CRCONService {
         const currentIndex = Number.isInteger(sequenceState.currentIndex)
             ? sequenceState.currentIndex
             : 0;
-        const maxPosition = sequence.reduce(
-            (highestPosition, entry) => Math.max(highestPosition, entry.sequencePosition),
-            0
-        );
-        const nextIndex = currentIndex >= maxPosition ? 0 : currentIndex + 1;
+        const nextIndex = this.getDirectNextSequencePosition(sequenceState);
         const existingIndex = this.findPreferredSequenceIndex(sequence, mapId, currentIndex);
 
         if (existingIndex === nextIndex) {
@@ -796,18 +794,145 @@ class CRCONService {
 
     async getMatchSnapshot() {
         const status = await this.getStatus();
+        const publicInfo = await this.getPublicInfo();
+        const queuedState = publicInfo
+            ? {
+                currentMapId: publicInfo.result.current_map?.id || null,
+                nextMapId: publicInfo.result.next_map?.id || null
+            }
+            : await this.readQueuedNextMapState();
+
+        const statusCurrentMapId = this.resolveMapIdFromValues([
+            status?.result?.map?.id,
+            status?.result?.map?.pretty_name,
+            status?.result?.current_map?.id,
+            status?.result?.current_map?.pretty_name
+        ]);
+        const currentMapId = queuedState?.currentMapId || statusCurrentMapId || null;
+
         return {
-            currentMapId: this.resolveMapIdFromValues([
-                status?.result?.map?.id,
-                status?.result?.map?.pretty_name,
-                status?.result?.current_map?.id,
-                status?.result?.current_map?.pretty_name
-            ]),
+            currentMapId,
             currentPlayers: status?.result?.current_players ?? 0,
-            gameActive: Boolean(status?.result?.map || status?.result?.current_map),
+            gameActive: Boolean(currentMapId || status?.result?.map || status?.result?.current_map),
+            nextMapId: queuedState?.nextMapId || null,
             matchStartEpochSeconds: this.matchStartEpochMs
                 ? Math.floor(this.matchStartEpochMs / 1000)
                 : null
+        };
+    }
+
+    normalizePublicInfoResponse(responseData) {
+        const payload = responseData?.result || responseData || {};
+        const currentMapId = this.resolveMapIdFromValues([
+            payload.current_map?.id,
+            payload.current_map?.pretty_name,
+            payload.current_map?.name,
+            payload.currentMap,
+            payload.currentMapName,
+            payload.map,
+            payload.mapName
+        ]);
+        const nextMapId = this.resolveMapIdFromValues([
+            payload.next_map?.id,
+            payload.next_map?.pretty_name,
+            payload.next_map?.name,
+            payload.nextMap,
+            payload.nextMapName
+        ]);
+
+        return {
+            result: {
+                current_map: this.findMapById(currentMapId) || buildMapStub(currentMapId, payload.currentMapName),
+                next_map: this.findMapById(nextMapId) || buildMapStub(nextMapId, payload.nextMapName),
+                raw: payload
+            }
+        };
+    }
+
+    async getPublicInfo() {
+        if (!this.client) {
+            return null;
+        }
+
+        try {
+            const response = await this.client.get('/api/get_public_info');
+            return this.normalizePublicInfoResponse(response.data);
+        } catch (error) {
+            logger.warn(
+                `[CRCON ${this.serverName}] GET get_public_info failed: ${this.formatRequestError(error)}`
+            );
+            return null;
+        }
+    }
+
+    getDirectNextSequencePosition(sequenceState) {
+        const currentIndex = Number.isInteger(sequenceState?.currentIndex)
+            ? sequenceState.currentIndex
+            : 0;
+        const sequence = Array.isArray(sequenceState?.entries) ? sequenceState.entries : [];
+        const maxPosition = sequence.reduce(
+            (highestPosition, entry) => Math.max(highestPosition, entry.sequencePosition),
+            0
+        );
+
+        return currentIndex >= maxPosition ? 0 : currentIndex + 1;
+    }
+
+    async readQueuedNextMapState() {
+        const publicInfo = await this.getPublicInfo();
+        if (publicInfo?.result?.next_map?.id || publicInfo?.result?.current_map?.id) {
+            return {
+                currentMapId: publicInfo.result.current_map?.id || null,
+                nextMapId: publicInfo.result.next_map?.id || null,
+                source: 'public-info'
+            };
+        }
+
+        if (!this.hasDirectRconConfigured()) {
+            return {
+                currentMapId: this.currentMatchMapId,
+                nextMapId: null,
+                source: 'unavailable'
+            };
+        }
+
+        const sequenceResponse = await this.executeDirectCommand(
+            'GetServerInformation',
+            { Name: 'mapsequence', Value: '' },
+            'get_map_rotation'
+        );
+        const sequenceState = this.normalizeDirectSequenceState(sequenceResponse.result);
+        const nextPosition = this.getDirectNextSequencePosition(sequenceState);
+        const nextEntry = sequenceState.entries.find((entry) => entry.sequencePosition === nextPosition) || null;
+        const currentEntry = sequenceState.entries.find(
+            (entry) => entry.sequencePosition === sequenceState.currentIndex
+        ) || null;
+
+        return {
+            currentMapId: currentEntry?.id || this.currentMatchMapId,
+            nextMapId: nextEntry?.id || null,
+            source: 'direct-sequence'
+        };
+    }
+
+    async queueNextMap(mapId) {
+        const response = await this.post('set_map_rotation', { map_names: [mapId] });
+        this.assertCommandSucceeded(response, 'set_map_rotation');
+
+        const queuedState = await this.readQueuedNextMapState();
+        if (queuedState?.nextMapId && queuedState.nextMapId !== mapId) {
+            throw new Error(
+                `Queued next map mismatch: expected ${mapId} but observed ${queuedState.nextMapId} via ${queuedState.source}`
+            );
+        }
+
+        if (!queuedState?.nextMapId) {
+            throw new Error(`Queued next map could not be verified for ${mapId}`);
+        }
+
+        return {
+            response,
+            queuedState
         };
     }
 

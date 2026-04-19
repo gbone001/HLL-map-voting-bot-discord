@@ -823,6 +823,7 @@ class MapVotingService {
         }
 
         const aliases = [
+            typeof mapPayload === 'string' || typeof mapPayload === 'number' ? mapPayload : null,
             mapPayload?.map_id,
             mapPayload?.id,
             mapPayload?.name,
@@ -855,6 +856,21 @@ class MapVotingService {
                 canonicalMapLookup
             );
         };
+
+        if (typeof this.crcon?.getMatchSnapshot === 'function') {
+            try {
+                const snapshot = await this.crcon.getMatchSnapshot();
+                const snapshotCurrentMapId = this.resolveMapIdFromPayload(
+                    snapshot?.currentMapId,
+                    canonicalMapLookup
+                );
+                if (snapshotCurrentMapId) {
+                    return snapshotCurrentMapId;
+                }
+            } catch (error) {
+                logger.warn(`[MapVoting S${this.serverNum}] Could not fetch live match snapshot for current map detection: ${error.message}`);
+            }
+        }
 
         const cachedCurrentMapId = resolveCurrentMapId(this.lastServerStatus);
         if (cachedCurrentMapId) {
@@ -1060,7 +1076,7 @@ class MapVotingService {
                 );
             }
 
-            await this.crcon.post('set_map_rotation', { map_names: [selectedMap.id] });
+            await this.crcon.queueNextMap(selectedMap.id);
             logger.info(`[MapVoting S${this.serverNum}] Applied non-seeded rotation map: ${selectedMap.id}`);
             return true;
         } catch (error) {
@@ -1185,8 +1201,14 @@ class MapVotingService {
 
             // If no vote result (0 votes or error), pick random from available maps
             if (!mapId && candidateMaps.length > 0) {
-                const randomIndex = Math.floor(Math.random() * candidateMaps.length);
-                mapId = candidateMaps[randomIndex].id;
+                const fallbackCandidateMaps = currentMapId
+                    ? candidateMaps.filter((candidateMap) => candidateMap.id !== currentMapId)
+                    : candidateMaps;
+                const randomSelectionPool = fallbackCandidateMaps.length > 0
+                    ? fallbackCandidateMaps
+                    : candidateMaps;
+                const randomIndex = Math.floor(Math.random() * randomSelectionPool.length);
+                mapId = randomSelectionPool[randomIndex].id;
                 logger.info(`[MapVoting S${this.serverNum}] No votes cast, picking random: ${mapId}`);
             }
 
@@ -1197,7 +1219,7 @@ class MapVotingService {
                 );
 
                 logger.info(`[MapVoting S${this.serverNum}] Setting next map: ${mapId}`);
-                await this.crcon.post('set_map_rotation', { map_names: [mapId] });
+                await this.crcon.queueNextMap(mapId);
             } else {
                 logger.warn(`[MapVoting S${this.serverNum}] Could not determine next map`);
             }

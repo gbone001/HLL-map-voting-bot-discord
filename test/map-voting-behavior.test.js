@@ -352,8 +352,8 @@ test('vote finalization skips the live current map and picks the next highest el
         }
     };
     service.crcon = {
-        post: async (_endpoint, payload) => {
-            selectedRotationMap = payload.map_names[0];
+        queueNextMap: async (mapId) => {
+            selectedRotationMap = mapId;
         }
     };
     service.getAllMaps = async () => ([
@@ -373,6 +373,64 @@ test('vote finalization skips the live current map and picks the next highest el
 
     assert.equal(mapId, 'carentan_warfare');
     assert.equal(selectedRotationMap, 'carentan_warfare');
+});
+
+test('vote finalization prefers match snapshot current map over stale status when excluding the live map', async () => {
+    const service = new MapVotingService(1);
+    let selectedRotationMap = null;
+
+    service.voteMessageId = 'poll-message-stale-status';
+    service.maps = [
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare' },
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare' }
+    ];
+    service.channel = {
+        messages: {
+            fetch: async () => ({
+                poll: {
+                    answers: new Map([
+                        ['1', { text: 'Omaha Beach Warfare', voteCount: 3 }],
+                        ['2', { text: 'Utah Beach Warfare', voteCount: 2 }]
+                    ])
+                }
+            })
+        }
+    };
+    service.crcon = {
+        getMatchSnapshot: async () => ({
+            currentMapId: 'omahabeach_warfare',
+            nextMapId: 'carentan_warfare',
+            currentPlayers: 90,
+            gameActive: true,
+            matchStartEpochSeconds: 1776591000
+        }),
+        getStatus: async () => ({
+            result: {
+                current_map: {
+                    id: 'stmereeglise_warfare',
+                    pretty_name: 'St. Mere Eglise Warfare'
+                }
+            }
+        }),
+        queueNextMap: async (mapId) => {
+            selectedRotationMap = mapId;
+        }
+    };
+    service.getAllMaps = async () => ([
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Omaha Beach' } },
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Utah Beach' } },
+        { id: 'stmereeglise_warfare', pretty_name: 'St. Mere Eglise Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'St. Mere Eglise' } }
+    ]);
+    service.getRecentExcludedMapIds = async () => new Set();
+    service.getResults = async () => [
+        ['Omaha Beach Warfare', 3],
+        ['Utah Beach Warfare', 2]
+    ];
+
+    const mapId = await service.setVoteResult();
+
+    assert.equal(mapId, 'utahbeach_warfare');
+    assert.equal(selectedRotationMap, 'utahbeach_warfare');
 });
 
 test('vote finalization random fallback uses live poll options instead of stale in-memory maps', async () => {
@@ -399,8 +457,8 @@ test('vote finalization random fallback uses live poll options instead of stale 
         }
     };
     service.crcon = {
-        post: async (_endpoint, payload) => {
-            selectedRotationMap = payload.map_names[0];
+        queueNextMap: async (mapId) => {
+            selectedRotationMap = mapId;
         }
     };
     service.getAllMaps = async () => ([
@@ -420,6 +478,53 @@ test('vote finalization random fallback uses live poll options instead of stale 
 
         assert.equal(mapId, 'utahbeach_warfare');
         assert.equal(selectedRotationMap, 'utahbeach_warfare');
+    } finally {
+        Math.random = originalRandom;
+    }
+});
+
+test('vote finalization random fallback excludes the live current map when no votes were cast', async () => {
+    const originalRandom = Math.random;
+    const service = new MapVotingService(1);
+    let selectedRotationMap = null;
+
+    service.voteMessageId = 'poll-message-random-current-map';
+    service.maps = [
+        { id: 'stmariedumont_warfare', pretty_name: 'St. Marie Du Mont Warfare' },
+        { id: 'carentan_warfare', pretty_name: 'Carentan Warfare' }
+    ];
+    service.channel = {
+        messages: {
+            fetch: async () => ({
+                poll: {
+                    answers: new Map([
+                        ['1', { text: 'St. Marie Du Mont Warfare', voteCount: 0 }],
+                        ['2', { text: 'Carentan Warfare', voteCount: 0 }]
+                    ])
+                }
+            })
+        }
+    };
+    service.crcon = {
+        queueNextMap: async (mapId) => {
+            selectedRotationMap = mapId;
+        }
+    };
+    service.getAllMaps = async () => ([
+        { id: 'stmariedumont_warfare', pretty_name: 'St. Marie Du Mont Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'St. Marie Du Mont' } },
+        { id: 'carentan_warfare', pretty_name: 'Carentan Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Carentan' } }
+    ]);
+    service.getRecentExcludedMapIds = async () => new Set();
+    service.getCurrentMapId = async () => 'stmariedumont_warfare';
+    service.getResults = async () => null;
+
+    Math.random = () => 0;
+
+    try {
+        const mapId = await service.setVoteResult();
+
+        assert.equal(mapId, 'carentan_warfare');
+        assert.equal(selectedRotationMap, 'carentan_warfare');
     } finally {
         Math.random = originalRandom;
     }
@@ -447,8 +552,8 @@ test('non-seeded rotation falls back to available maps when no non-seeded list i
     service.getRecentExcludedMapIds = async () => new Set(['omahabeach_warfare']);
     service.getCurrentMapId = async () => 'omahabeach_warfare';
     service.crcon = {
-        post: async (_endpoint, payload) => {
-            selectedRotationMap = payload.map_names[0];
+        queueNextMap: async (mapId) => {
+            selectedRotationMap = mapId;
         }
     };
 
@@ -483,8 +588,8 @@ test('non-seeded rotation avoids re-selecting the current map when alternatives 
     service.getRecentExcludedMapIds = async () => new Set(['omahabeach_warfare', 'utahbeach_warfare']);
     service.getCurrentMapId = async () => 'omahabeach_warfare';
     service.crcon = {
-        post: async (_endpoint, payload) => {
-            selectedRotationMap = payload.map_names[0];
+        queueNextMap: async (mapId) => {
+            selectedRotationMap = mapId;
         }
     };
 

@@ -82,24 +82,39 @@ test('vote finalization in direct RCON mode moves an existing winner into the sl
     });
 
     const commands = [];
+    const sequenceState = {
+        currentIndex: 10,
+        MapSequence: [
+            { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 0 },
+            { MapName: 'Foy', MapId: 'foy_warfare', position: 9 },
+            { MapName: 'Omaha Beach', MapId: 'omahabeach_warfare', position: 10 },
+            { MapName: 'Kharkov', MapId: 'kharkov_warfare', position: 11 },
+            { MapName: 'St. Mere Eglise', MapId: 'stmereeglise_warfare', position: 15 },
+            { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 22 }
+        ]
+    };
     crcon.hasDirectRconConfigured = () => true;
     crcon.executeDirectCommand = async (command, payload, endpoint) => {
         commands.push({ command, payload, endpoint });
 
         if (command === 'GetServerInformation') {
             return {
-                result: {
-                    currentIndex: 10,
-                    MapSequence: [
-                        { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 0 },
-                        { MapName: 'Foy', MapId: 'foy_warfare', position: 9 },
-                        { MapName: 'Omaha Beach', MapId: 'omahabeach_warfare', position: 10 },
-                        { MapName: 'Kharkov', MapId: 'kharkov_warfare', position: 11 },
-                        { MapName: 'St. Mere Eglise', MapId: 'stmereeglise_warfare', position: 15 },
-                        { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 22 }
-                    ]
-                }
+                result: sequenceState
             };
+        }
+
+        if (command === 'MoveMapInSequence') {
+            sequenceState.MapSequence = sequenceState.MapSequence
+                .map((entry) => {
+                    if (entry.position === payload.CurrentIndex) {
+                        return { ...entry, position: payload.NewIndex };
+                    }
+                    if (entry.position >= payload.NewIndex && entry.position < payload.CurrentIndex) {
+                        return { ...entry, position: entry.position + 1 };
+                    }
+                    return entry;
+                });
+            return { result: { ok: true } };
         }
 
         return { result: { ok: true } };
@@ -120,6 +135,11 @@ test('vote finalization in direct RCON mode moves an existing winner into the sl
             command: 'MoveMapInSequence',
             payload: { CurrentIndex: 15, NewIndex: 11 },
             endpoint: 'set_map_rotation'
+        },
+        {
+            command: 'GetServerInformation',
+            payload: { Name: 'mapsequence', Value: '' },
+            endpoint: 'get_map_rotation'
         }
     ]);
 });
@@ -134,22 +154,38 @@ test('vote finalization in direct RCON mode adds a missing winner into the slot 
     });
 
     const commands = [];
+    const sequenceState = {
+        currentIndex: 10,
+        MapSequence: [
+            { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 0 },
+            { MapName: 'Foy', MapId: 'foy_warfare', position: 9 },
+            { MapName: 'Omaha Beach', MapId: 'omahabeach_warfare', position: 10 },
+            { MapName: 'Kharkov', MapId: 'kharkov_warfare', position: 11 }
+        ]
+    };
     crcon.hasDirectRconConfigured = () => true;
     crcon.executeDirectCommand = async (command, payload, endpoint) => {
         commands.push({ command, payload, endpoint });
 
         if (command === 'GetServerInformation') {
             return {
-                result: {
-                    currentIndex: 10,
-                    MapSequence: [
-                        { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 0 },
-                        { MapName: 'Foy', MapId: 'foy_warfare', position: 9 },
-                        { MapName: 'Omaha Beach', MapId: 'omahabeach_warfare', position: 10 },
-                        { MapName: 'Kharkov', MapId: 'kharkov_warfare', position: 11 }
-                    ]
-                }
+                result: sequenceState
             };
+        }
+
+        if (command === 'AddMapToSequence') {
+            sequenceState.MapSequence = sequenceState.MapSequence.map((entry) => {
+                if (entry.position >= payload.Index) {
+                    return { ...entry, position: entry.position + 1 };
+                }
+                return entry;
+            });
+            sequenceState.MapSequence.push({
+                MapName: payload.MapName,
+                MapId: payload.MapName,
+                position: payload.Index
+            });
+            return { result: { ok: true } };
         }
 
         return { result: { ok: true } };
@@ -174,6 +210,11 @@ test('vote finalization in direct RCON mode adds a missing winner into the slot 
             command: 'AddMapToSequence',
             payload: { MapName: 'stmariedumont_warfare', Index: 11 },
             endpoint: 'set_map_rotation'
+        },
+        {
+            command: 'GetServerInformation',
+            payload: { Name: 'mapsequence', Value: '' },
+            endpoint: 'get_map_rotation'
         }
     ]);
 });
@@ -190,6 +231,15 @@ test('vote finalization in fallback mode sends the voted winner through direct R
     });
 
     const commands = [];
+    const sequenceState = {
+        currentIndex: 10,
+        MapSequence: [
+            { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 0 },
+            { MapName: 'Foy', MapId: 'foy_warfare', position: 9 },
+            { MapName: 'Omaha Beach', MapId: 'omahabeach_warfare', position: 10 },
+            { MapName: 'Kharkov', MapId: 'kharkov_warfare', position: 11 }
+        ]
+    };
     crcon.client = {
         post: async () => {
             const error = new Error('Request failed with status code 500');
@@ -204,16 +254,23 @@ test('vote finalization in fallback mode sends the voted winner through direct R
 
         if (command === 'GetServerInformation') {
             return {
-                result: {
-                    currentIndex: 10,
-                    MapSequence: [
-                        { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 0 },
-                        { MapName: 'Foy', MapId: 'foy_warfare', position: 9 },
-                        { MapName: 'Omaha Beach', MapId: 'omahabeach_warfare', position: 10 },
-                        { MapName: 'Kharkov', MapId: 'kharkov_warfare', position: 11 }
-                    ]
-                }
+                result: sequenceState
             };
+        }
+
+        if (command === 'AddMapToSequence') {
+            sequenceState.MapSequence = sequenceState.MapSequence.map((entry) => {
+                if (entry.position >= payload.Index) {
+                    return { ...entry, position: entry.position + 1 };
+                }
+                return entry;
+            });
+            sequenceState.MapSequence.push({
+                MapName: payload.MapName,
+                MapId: payload.MapName,
+                position: payload.Index
+            });
+            return { result: { ok: true } };
         }
 
         return { result: { ok: true } };
@@ -234,6 +291,11 @@ test('vote finalization in fallback mode sends the voted winner through direct R
             command: 'AddMapToSequence',
             payload: { MapName: 'stmereeglise_warfare', Index: 11 },
             endpoint: 'set_map_rotation'
+        },
+        {
+            command: 'GetServerInformation',
+            payload: { Name: 'mapsequence', Value: '' },
+            endpoint: 'get_map_rotation'
         }
     ]);
 });
@@ -248,22 +310,32 @@ test('direct RCON next-map selection uses currentIndex instead of sequence posit
     });
 
     const commands = [];
+    const sequenceState = {
+        currentIndex: 10,
+        mAPS: [
+            { name: 'UTAH BEACH', iD: '/Game/Maps/utahbeach_warfare', position: 0 },
+            { name: 'KURSK', iD: '/Game/Maps/kursk_warfare_night', position: 9 },
+            { name: 'OMAHA BEACH', iD: '/Game/Maps/omahabeach_warfare', position: 10 },
+            { name: 'KHARKOV', iD: '/Game/Maps/kharkov_warfare', position: 11 }
+        ]
+    };
     crcon.hasDirectRconConfigured = () => true;
     crcon.executeDirectCommand = async (command, payload, endpoint) => {
         commands.push({ command, payload, endpoint });
 
         if (command === 'GetServerInformation') {
             return {
-                result: {
-                    currentIndex: 10,
-                    mAPS: [
-                        { name: 'UTAH BEACH', iD: '/Game/Maps/utahbeach_warfare', position: 0 },
-                        { name: 'KURSK', iD: '/Game/Maps/kursk_warfare_night', position: 9 },
-                        { name: 'OMAHA BEACH', iD: '/Game/Maps/omahabeach_warfare', position: 10 },
-                        { name: 'KHARKOV', iD: '/Game/Maps/kharkov_warfare', position: 11 }
-                    ]
-                }
+                result: sequenceState
             };
+        }
+
+        if (command === 'AddMapToSequence') {
+            sequenceState.mAPS.push({
+                name: payload.MapName,
+                iD: `/Game/Maps/${payload.MapName}`,
+                position: payload.Index
+            });
+            return { result: { ok: true } };
         }
 
         return { result: { ok: true } };
@@ -283,4 +355,73 @@ test('direct RCON next-map selection uses currentIndex instead of sequence posit
             endpoint: 'set_map_rotation'
         }
     ]);
+});
+
+test('queueNextMap verifies the queued next map via CRCON public info in API mode', async () => {
+    const crcon = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_ONLY,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token'
+    });
+
+    const requests = [];
+    crcon.client = {
+        post: async (url, payload) => {
+            requests.push({ method: 'post', url, payload });
+            return { data: { result: { ok: true } } };
+        },
+        get: async (url) => {
+            requests.push({ method: 'get', url });
+            return {
+                data: {
+                    result: {
+                        currentMapName: 'Foy Warfare',
+                        nextMapName: 'St. Mere Eglise Warfare'
+                    }
+                }
+            };
+        }
+    };
+
+    const result = await crcon.queueNextMap('stmereeglise_warfare');
+
+    assert.equal(result.queuedState.nextMapId, 'stmereeglise_warfare');
+    assert.deepEqual(requests, [
+        {
+            method: 'post',
+            url: '/api/set_map_rotation',
+            payload: { map_names: ['stmereeglise_warfare'] }
+        },
+        {
+            method: 'get',
+            url: '/api/get_public_info'
+        }
+    ]);
+});
+
+test('queueNextMap throws when verified queued map does not match the requested winner', async () => {
+    const crcon = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_ONLY,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token'
+    });
+
+    crcon.client = {
+        post: async () => ({ data: { result: { ok: true } } }),
+        get: async () => ({
+            data: {
+                result: {
+                    currentMapName: 'Foy Warfare',
+                    nextMapName: 'Utah Beach Warfare'
+                }
+            }
+        })
+    };
+
+    await assert.rejects(
+        () => crcon.queueNextMap('stmereeglise_warfare'),
+        /Queued next map mismatch/
+    );
 });
