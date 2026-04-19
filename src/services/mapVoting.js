@@ -1112,39 +1112,57 @@ class MapVotingService {
         }
     }
 
-    async getVoteResult(mapResults, candidateMaps = this.maps) {
+    async getVoteResult(mapResults, candidateMaps = this.maps, currentMapId = null) {
         try {
-            let candidates = [];
-            let voteCount = -1;
+            const candidateMapByPrettyName = new Map(
+                (candidateMaps || []).map((map) => [map.pretty_name, map])
+            );
 
-            for (const item of mapResults) {
-                if (item[1] >= voteCount) {
-                    if (item[1] > voteCount) {
-                        candidates = [];
-                        voteCount = item[1];
-                    }
-                    candidates.push(item);
+            let candidates = [];
+            let bestEligibleVoteCount = null;
+
+            for (const [answerText, voteCount] of mapResults) {
+                const matchingMap = candidateMapByPrettyName.get(answerText);
+                if (!matchingMap) {
+                    continue;
                 }
+
+                if (currentMapId && matchingMap.id === currentMapId) {
+                    logger.warn(
+                        `[MapVoting S${this.serverNum}] Ignoring poll winner candidate because it matches the live current map: ${matchingMap.id}`
+                    );
+                    continue;
+                }
+
+                if (bestEligibleVoteCount === null) {
+                    bestEligibleVoteCount = voteCount;
+                }
+
+                if (voteCount !== bestEligibleVoteCount) {
+                    break;
+                }
+
+                candidates.push(matchingMap);
             }
 
-            let voteResult = null;
+            if (candidates.length === 0) {
+                return null;
+            }
+
+            let selectedMap = null;
             if (candidates.length === 1) {
-                voteResult = candidates[0][0];
+                selectedMap = candidates[0];
             } else if (candidates.length > 1) {
                 const i = Math.floor(Math.random() * candidates.length);
-                voteResult = candidates[i][0];
+                selectedMap = candidates[i];
             }
 
-            if (!voteResult) return null;
-
-            for (const map of candidateMaps || []) {
-                if (map.pretty_name === voteResult) {
-                    logger.info(`[MapVoting S${this.serverNum}] Vote Result: ${map.id}`);
-                    return map.id;
-                }
+            if (!selectedMap) {
+                return null;
             }
 
-            return null;
+            logger.info(`[MapVoting S${this.serverNum}] Vote Result: ${selectedMap.id}`);
+            return selectedMap.id;
         } catch (error) {
             logger.error(`[MapVoting S${this.serverNum}] Error getting vote result:`, error.message);
             return null;
@@ -1162,7 +1180,7 @@ class MapVotingService {
             let mapId = null;
 
             if (mapResults) {
-                mapId = await this.getVoteResult(mapResults, candidateMaps);
+                mapId = await this.getVoteResult(mapResults, candidateMaps, currentMapId);
             }
 
             // If no vote result (0 votes or error), pick random from available maps
@@ -1177,10 +1195,6 @@ class MapVotingService {
                 logger.info(
                     `[MapVoting S${this.serverNum}] Vote finalization context: currentMap=${currentMapId || 'unknown'} recentExcluded=${recentExcludedSummary} selected=${mapId}`
                 );
-
-                if (currentMapId && mapId === currentMapId) {
-                    logger.warn(`[MapVoting S${this.serverNum}] Selected next map matches current map: ${mapId}`);
-                }
 
                 logger.info(`[MapVoting S${this.serverNum}] Setting next map: ${mapId}`);
                 await this.crcon.post('set_map_rotation', { map_names: [mapId] });
@@ -1279,7 +1293,18 @@ class MapVotingService {
             }
 
             if (this.voteMessage && this.voteMessage.poll) {
-                await this.voteMessage.poll.end();
+                try {
+                    await this.voteMessage.poll.end();
+                } catch (error) {
+                    const message = error?.message || '';
+                    if (!message.includes('already expired')) {
+                        throw error;
+                    }
+
+                    logger.warn(
+                        `[MapVoting S${this.serverNum}] Poll already expired before finalization; continuing with vote result processing`
+                    );
+                }
             }
             const finalizedMapId = await this.setVoteResult();
 

@@ -289,6 +289,92 @@ test('duplicate vote finalization claims do not overwrite the first selected map
     }
 });
 
+test('stopVote still finalizes the next map when the Discord poll has already expired', async () => {
+    const gameStart = Date.now() + Math.floor(Math.random() * 100000);
+    const serverNum = 1;
+    const messageId = `vote-${gameStart}`;
+    let setVoteResultCalls = 0;
+
+    voteStore.deleteVote(gameStart, serverNum);
+    voteStore.setVote(messageId, gameStart, serverNum, [
+        { id: 'stmariedumont_warfare', pretty_name: 'St. Marie Du Mont Warfare' }
+    ]);
+
+    const service = new MapVotingService(serverNum);
+    service.gameStart = gameStart;
+    service.voteMessageId = messageId;
+    service.voteActive = true;
+    service.voteMessage = {
+        poll: {
+            end: async () => {
+                throw new Error('This poll has already expired.');
+            }
+        }
+    };
+    service.setVoteResult = async () => {
+        setVoteResultCalls += 1;
+        return 'stmariedumont_warfare';
+    };
+
+    try {
+        const finalizedMapId = await service.stopVote();
+
+        assert.equal(finalizedMapId, 'stmariedumont_warfare');
+        assert.equal(setVoteResultCalls, 1);
+        assert.equal(service.voteActive, false);
+        assert.equal(voteStore.getVote(gameStart, serverNum), null);
+    } finally {
+        voteStore.deleteVote(gameStart, serverNum);
+    }
+});
+
+test('vote finalization skips the live current map and picks the next highest eligible winner', async () => {
+    const service = new MapVotingService(1);
+    let selectedRotationMap = null;
+
+    service.voteMessageId = 'poll-message-current-map';
+    service.maps = [
+        { id: 'stmariedumont_warfare', pretty_name: 'St. Marie Du Mont Warfare' },
+        { id: 'carentan_warfare', pretty_name: 'Carentan Warfare' },
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare' }
+    ];
+    service.channel = {
+        messages: {
+            fetch: async () => ({
+                poll: {
+                    answers: new Map([
+                        ['1', { text: 'St. Marie Du Mont Warfare', voteCount: 3 }],
+                        ['2', { text: 'Carentan Warfare', voteCount: 2 }],
+                        ['3', { text: 'Omaha Beach Warfare', voteCount: 1 }]
+                    ])
+                }
+            })
+        }
+    };
+    service.crcon = {
+        post: async (_endpoint, payload) => {
+            selectedRotationMap = payload.map_names[0];
+        }
+    };
+    service.getAllMaps = async () => ([
+        { id: 'stmariedumont_warfare', pretty_name: 'St. Marie Du Mont Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'St. Marie Du Mont' } },
+        { id: 'carentan_warfare', pretty_name: 'Carentan Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Carentan' } },
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Omaha Beach' } }
+    ]);
+    service.getRecentExcludedMapIds = async () => new Set(['stmariedumont_warfare']);
+    service.getCurrentMapId = async () => 'stmariedumont_warfare';
+    service.getResults = async () => [
+        ['St. Marie Du Mont Warfare', 3],
+        ['Carentan Warfare', 2],
+        ['Omaha Beach Warfare', 1]
+    ];
+
+    const mapId = await service.setVoteResult();
+
+    assert.equal(mapId, 'carentan_warfare');
+    assert.equal(selectedRotationMap, 'carentan_warfare');
+});
+
 test('vote finalization random fallback uses live poll options instead of stale in-memory maps', async () => {
     const originalRandom = Math.random;
     const service = new MapVotingService(1);
