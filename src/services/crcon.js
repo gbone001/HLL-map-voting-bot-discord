@@ -20,6 +20,8 @@ const TRANSPORT_MODES = {
 
 const DEFAULT_CRCON_CIRCUIT_THRESHOLD = 3;
 const DEFAULT_CRCON_CIRCUIT_COOLDOWN_MS = 60 * 1000;
+const DEFAULT_QUEUE_VERIFICATION_ATTEMPTS = 4;
+const DEFAULT_QUEUE_VERIFICATION_DELAY_MS = 1500;
 
 class CRCONService {
     constructor(configOrBaseUrl, apiToken, serverName = 'Server') {
@@ -1051,18 +1053,76 @@ class CRCONService {
         };
     }
 
+    async delay(ms) {
+        await new Promise((resolve) => setTimeout(resolve, ms));
+    }
+
+    async verifyQueuedNextMap(mapId, options = {}) {
+        const maxAttempts = Number.isInteger(options.maxAttempts)
+            ? options.maxAttempts
+            : DEFAULT_QUEUE_VERIFICATION_ATTEMPTS;
+        const delayMs = Number.isInteger(options.delayMs)
+            ? options.delayMs
+            : DEFAULT_QUEUE_VERIFICATION_DELAY_MS;
+
+        let lastQueuedState = null;
+        let lastVerification = {
+            expectedMapId: mapId,
+            observedMapId: null,
+            source: 'unknown',
+            authoritative: false,
+            verified: false,
+            attempts: 0
+        };
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            const queuedState = await this.readQueuedNextMapState();
+            const observedMapId = queuedState?.nextMapId || null;
+            const matchesExpectedMap = observedMapId && this.areMapReferencesEquivalent(observedMapId, mapId);
+
+            lastQueuedState = queuedState;
+            lastVerification = {
+                expectedMapId: mapId,
+                observedMapId,
+                source: queuedState?.source || 'unknown',
+                authoritative: Boolean(queuedState?.authoritative),
+                verified: Boolean(matchesExpectedMap),
+                attempts: attempt
+            };
+
+            if (matchesExpectedMap) {
+                return {
+                    queuedState,
+                    verification: lastVerification
+                };
+            }
+
+            if (!observedMapId && !queuedState?.authoritative && queuedState?.source === 'direct-sequence') {
+                return {
+                    queuedState,
+                    verification: lastVerification
+                };
+            }
+
+            if (attempt < maxAttempts) {
+                logger.warn(
+                    `[CRCON ${this.serverName}] Queued next map verification attempt ${attempt}/${maxAttempts} did not match expected=${mapId}; observed=${observedMapId || 'none'} via ${queuedState?.source || 'unknown'}`
+                );
+                await this.delay(delayMs);
+            }
+        }
+
+        return {
+            queuedState: lastQueuedState,
+            verification: lastVerification
+        };
+    }
+
     async queueNextMap(mapId) {
         const response = await this.post('set_map_rotation', { map_names: [mapId] });
         this.assertCommandSucceeded(response, 'set_map_rotation');
 
-        const queuedState = await this.readQueuedNextMapState();
-        const verification = {
-            expectedMapId: mapId,
-            observedMapId: queuedState?.nextMapId || null,
-            source: queuedState?.source || 'unknown',
-            authoritative: Boolean(queuedState?.authoritative),
-            verified: false
-        };
+        const { queuedState, verification } = await this.verifyQueuedNextMap(mapId);
 
         if (queuedState?.nextMapId && !this.areMapReferencesEquivalent(queuedState.nextMapId, mapId)) {
             throw new Error(
@@ -1085,8 +1145,6 @@ class CRCONService {
 
             throw new Error(`Queued next map could not be verified for ${mapId}`);
         }
-
-        verification.verified = true;
 
         return {
             response,

@@ -444,22 +444,93 @@ test('queueNextMap throws when verified queued map does not match the requested 
         crconToken: 'token'
     });
 
+    let verificationReads = 0;
     crcon.client = {
         post: async () => ({ data: { result: { ok: true } } }),
-        get: async () => ({
-            data: {
-                result: {
-                    currentMapName: 'Foy Warfare',
-                    nextMapName: 'Utah Beach Warfare'
+        get: async () => {
+            verificationReads += 1;
+            return {
+                data: {
+                    result: {
+                        currentMapName: 'Foy Warfare',
+                        nextMapName: 'Utah Beach Warfare'
+                    }
                 }
-            }
-        })
+            };
+        }
     };
 
     await assert.rejects(
         () => crcon.queueNextMap('stmereeglise_warfare'),
         /Queued next map mismatch/
     );
+    assert.equal(verificationReads, 4);
+});
+
+test('queueNextMap tolerates a stale public-info read before the queued map settles', async () => {
+    const crcon = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_ONLY,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token'
+    });
+
+    const requests = [];
+    let readIndex = 0;
+    crcon.delay = async () => {};
+    crcon.client = {
+        post: async (url, payload) => {
+            requests.push({ method: 'post', url, payload });
+            return { data: { result: { ok: true } } };
+        },
+        get: async (url) => {
+            requests.push({ method: 'get', url, readIndex });
+            readIndex += 1;
+
+            if (readIndex === 1) {
+                return {
+                    data: {
+                        result: {
+                            currentMapName: 'Kharkov Warfare',
+                            nextMapName: 'St. Marie Du Mont Warfare'
+                        }
+                    }
+                };
+            }
+
+            return {
+                data: {
+                    result: {
+                        currentMapName: 'Kharkov Warfare',
+                        nextMapName: 'St. Mere Eglise Warfare'
+                    }
+                }
+            };
+        }
+    };
+
+    const result = await crcon.queueNextMap('stmereeglise_warfare');
+
+    assert.equal(result.queuedState.nextMapId, 'stmereeglise_warfare');
+    assert.equal(result.verification.verified, true);
+    assert.equal(result.verification.attempts, 2);
+    assert.deepEqual(requests, [
+        {
+            method: 'post',
+            url: '/api/set_map_rotation',
+            payload: { map_names: ['stmereeglise_warfare'] }
+        },
+        {
+            method: 'get',
+            url: '/api/get_public_info',
+            readIndex: 0
+        },
+        {
+            method: 'get',
+            url: '/api/get_public_info',
+            readIndex: 1
+        }
+    ]);
 });
 
 test('queueNextMap throws in direct RCON mode when the next sequence slot does not become the requested map', async () => {
