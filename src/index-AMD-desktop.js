@@ -594,6 +594,23 @@ client.on(Events.InteractionCreate, async (interaction) => {
                 }
             }
 
+            else if (customId === 'mapvote_load_pool_rotation' || customId.startsWith('mapvote_load_pool_rotation_')) {
+                await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+                try {
+                    const applied = await service.loadScheduleMapPoolAsRotation();
+                    service.clearCache();
+                    await interaction.editReply({
+                        content: applied
+                            ? 'Active schedule map pool loaded into server rotation.'
+                            : 'Active schedule map pool resolved to zero maps, so rotation was not changed.'
+                    });
+                } catch (error) {
+                    await interaction.editReply({
+                        content: `Failed to load active schedule map pool into rotation: ${error.message}`
+                    });
+                }
+            }
+
             // Back to main panel
             else if (customId === 'mapvote_back') {
                 await interaction.deferUpdate();

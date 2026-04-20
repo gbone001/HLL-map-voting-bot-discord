@@ -998,7 +998,8 @@ class CRCONService {
             return {
                 currentMapId: publicInfo.result.current_map?.id || null,
                 nextMapId: publicInfo.result.next_map?.id || null,
-                source: 'public-info'
+                source: 'public-info',
+                authoritative: true
             };
         }
 
@@ -1006,7 +1007,8 @@ class CRCONService {
             return {
                 currentMapId: this.currentMatchMapId,
                 nextMapId: null,
-                source: 'unavailable'
+                source: 'unavailable',
+                authoritative: false
             };
         }
 
@@ -1025,7 +1027,8 @@ class CRCONService {
         return {
             currentMapId: currentEntry?.id || this.currentMatchMapId,
             nextMapId: nextEntry?.id || null,
-            source: 'direct-sequence'
+            source: 'direct-sequence',
+            authoritative: false
         };
     }
 
@@ -1034,19 +1037,54 @@ class CRCONService {
         this.assertCommandSucceeded(response, 'set_map_rotation');
 
         const queuedState = await this.readQueuedNextMapState();
+        const verification = {
+            expectedMapId: mapId,
+            observedMapId: queuedState?.nextMapId || null,
+            source: queuedState?.source || 'unknown',
+            authoritative: Boolean(queuedState?.authoritative),
+            verified: false
+        };
+
         if (queuedState?.nextMapId && !this.areMapReferencesEquivalent(queuedState.nextMapId, mapId)) {
+            if (!queuedState.authoritative) {
+                logger.warn(
+                    `[CRCON ${this.serverName}] Advisory queued-map mismatch after set_map_rotation: expected=${mapId} observed=${queuedState.nextMapId} source=${queuedState.source}`
+                );
+
+                return {
+                    response,
+                    queuedState,
+                    verification
+                };
+            }
+
             throw new Error(
                 `Queued next map mismatch: expected ${mapId} but observed ${queuedState.nextMapId} via ${queuedState.source}`
             );
         }
 
         if (!queuedState?.nextMapId) {
+            if (!queuedState?.authoritative && queuedState?.source === 'direct-sequence') {
+                logger.warn(
+                    `[CRCON ${this.serverName}] Could not verify queued next map authoritatively after set_map_rotation; direct sequence did not expose a next entry for expected=${mapId}`
+                );
+
+                return {
+                    response,
+                    queuedState,
+                    verification
+                };
+            }
+
             throw new Error(`Queued next map could not be verified for ${mapId}`);
         }
 
+        verification.verified = true;
+
         return {
             response,
-            queuedState
+            queuedState,
+            verification
         };
     }
 
@@ -1073,6 +1111,92 @@ class CRCONService {
                 source: 'direct-sequence-position-0'
             }
         };
+    }
+
+    async replaceDirectMapRotation(mapIds) {
+        const desiredMapIds = [...new Set(mapIds.filter(Boolean))];
+        if (desiredMapIds.length === 0) {
+            throw new Error('replaceDirectMapRotation requires at least one map id');
+        }
+
+        const rotation = await this.getDirectMapRotation();
+        const currentMapIds = (rotation.result || []).map((entry) => entry.id).filter(Boolean);
+
+        for (let index = currentMapIds.length - 1; index >= 0; index -= 1) {
+            const currentMapId = currentMapIds[index];
+            if (!desiredMapIds.includes(currentMapId)) {
+                await this.executeDirectCommand(
+                    'RemoveMapFromRotation',
+                    { Index: index },
+                    'set_map_rotation'
+                );
+                currentMapIds.splice(index, 1);
+            }
+        }
+
+        for (let targetIndex = 0; targetIndex < desiredMapIds.length; targetIndex += 1) {
+            const desiredMapId = desiredMapIds[targetIndex];
+            const existingIndex = currentMapIds.indexOf(desiredMapId);
+
+            if (existingIndex === targetIndex) {
+                continue;
+            }
+
+            if (existingIndex >= 0) {
+                await this.executeDirectCommand(
+                    'RemoveMapFromRotation',
+                    { Index: existingIndex },
+                    'set_map_rotation'
+                );
+                currentMapIds.splice(existingIndex, 1);
+            }
+
+            await this.executeDirectCommand(
+                'AddMapToRotation',
+                { MapName: desiredMapId, Index: targetIndex },
+                'set_map_rotation'
+            );
+            currentMapIds.splice(targetIndex, 0, desiredMapId);
+        }
+
+        return {
+            result: {
+                map_names: desiredMapIds,
+                method: 'direct-rotation-sync'
+            }
+        };
+    }
+
+    async replaceMapRotation(mapIds) {
+        const desiredMapIds = hllMapCatalog.normalizeMapIds(mapIds || [], {
+            dropUnknown: false
+        });
+
+        if (desiredMapIds.length === 0) {
+            throw new Error('replaceMapRotation requires at least one valid map id');
+        }
+
+        if (this.hasApiConfigured()) {
+            const response = await this.client.post('/api/set_map_rotation', {
+                map_names: desiredMapIds
+            });
+            this.assertCommandSucceeded(response.data, 'set_map_rotation');
+
+            return {
+                response: response.data,
+                rotationMapIds: desiredMapIds
+            };
+        }
+
+        if (this.hasDirectRconConfigured()) {
+            const response = await this.replaceDirectMapRotation(desiredMapIds);
+            return {
+                response,
+                rotationMapIds: desiredMapIds
+            };
+        }
+
+        throw new Error(`Map rotation replacement is not configured for ${this.serverName}`);
     }
 
     getLocalMapCatalogStatus() {

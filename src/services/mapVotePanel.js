@@ -732,6 +732,12 @@ class MapVotePanelService {
                     '**Used When:** Server is below seeded threshold and no vote is running'
             },
             {
+                name: '🧭 Managed Rotation',
+                value:
+                    `**Active Pool Maps:** ${Array.isArray(config.managedRotationPoolMapIds) ? config.managedRotationPoolMapIds.length : 0}\n` +
+                    '**Behavior:** Active schedule pool is loaded as rotation and votes move the winner to the front'
+            },
+            {
                 name: '🗂️ Local Map Catalog',
                 value:
                     `**Source:** ${localCatalogStatus.source}\n` +
@@ -797,6 +803,11 @@ class MapVotePanelService {
                 .setCustomId('mapvote_sync_catalog')
                 .setLabel('Sync Maps From CRCON')
                 .setEmoji('🗂️')
+                .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+                .setCustomId('mapvote_load_pool_rotation')
+                .setLabel('Load Pool Rotation')
+                .setEmoji('🧭')
                 .setStyle(ButtonStyle.Success),
             new ButtonBuilder()
                 .setCustomId('mapvote_back')

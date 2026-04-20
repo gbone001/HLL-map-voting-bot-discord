@@ -686,8 +686,8 @@ test('vote finalization skips the live current map and picks the next highest el
         }
     };
     service.crcon = {
-        queueNextMap: async (mapId) => {
-            selectedRotationMap = mapId;
+        replaceMapRotation: async (mapIds) => {
+            selectedRotationMap = mapIds[0];
         }
     };
     service.getAllMaps = async () => ([
@@ -709,7 +709,7 @@ test('vote finalization skips the live current map and picks the next highest el
     assert.equal(selectedRotationMap, 'carentan_warfare');
 });
 
-test('vote finalization prefers match snapshot current map over stale status when excluding the live map', async () => {
+test('vote finalization prefers the live current map over stale status when excluding the live map', async () => {
     const service = new MapVotingService(1);
     let selectedRotationMap = null;
 
@@ -746,8 +746,8 @@ test('vote finalization prefers match snapshot current map over stale status whe
                 }
             }
         }),
-        queueNextMap: async (mapId) => {
-            selectedRotationMap = mapId;
+        replaceMapRotation: async (mapIds) => {
+            selectedRotationMap = mapIds[0];
         }
     };
     service.getAllMaps = async () => ([
@@ -791,8 +791,8 @@ test('vote finalization random fallback uses live poll options instead of stale 
         }
     };
     service.crcon = {
-        queueNextMap: async (mapId) => {
-            selectedRotationMap = mapId;
+        replaceMapRotation: async (mapIds) => {
+            selectedRotationMap = mapIds[0];
         }
     };
     service.getAllMaps = async () => ([
@@ -840,8 +840,8 @@ test('vote finalization uses the live Discord poll winner and queues that map', 
         }
     };
     service.crcon = {
-        queueNextMap: async (mapId) => {
-            queuedMapId = mapId;
+        replaceMapRotation: async (mapIds) => {
+            queuedMapId = mapIds[0];
         }
     };
     service.getAllMaps = async () => ([
@@ -882,8 +882,8 @@ test('vote finalization random fallback excludes the live current map when no vo
         }
     };
     service.crcon = {
-        queueNextMap: async (mapId) => {
-            selectedRotationMap = mapId;
+        replaceMapRotation: async (mapIds) => {
+            selectedRotationMap = mapIds[0];
         }
     };
     service.getAllMaps = async () => ([
@@ -928,8 +928,8 @@ test('non-seeded rotation falls back to available maps when no non-seeded list i
     service.getRecentExcludedMapIds = async () => new Set(['omahabeach_warfare']);
     service.getCurrentMapId = async () => 'omahabeach_warfare';
     service.crcon = {
-        queueNextMap: async (mapId) => {
-            selectedRotationMap = mapId;
+        replaceMapRotation: async (mapIds) => {
+            selectedRotationMap = mapIds[0];
         }
     };
 
@@ -964,8 +964,8 @@ test('non-seeded rotation avoids re-selecting the current map when alternatives 
     service.getRecentExcludedMapIds = async () => new Set(['omahabeach_warfare', 'utahbeach_warfare']);
     service.getCurrentMapId = async () => 'omahabeach_warfare';
     service.crcon = {
-        queueNextMap: async (mapId) => {
-            selectedRotationMap = mapId;
+        replaceMapRotation: async (mapIds) => {
+            selectedRotationMap = mapIds[0];
         }
     };
 
@@ -999,8 +999,8 @@ test('non-seeded rotation returns false when verified queueing rejects the selec
     service.getRecentExcludedMapIds = async () => new Set(['omahabeach_warfare']);
     service.getCurrentMapId = async () => 'omahabeach_warfare';
     service.crcon = {
-        queueNextMap: async () => {
-            throw new Error('Queued next map mismatch: expected utahbeach_warfare but observed omahabeach_warfare via public-info');
+        replaceMapRotation: async () => {
+            throw new Error('Failed to replace managed rotation');
         }
     };
 
@@ -1011,4 +1011,30 @@ test('non-seeded rotation returns false when verified queueing rejects the selec
     } finally {
         configManager.config = originalConfig;
     }
+});
+
+test('loading the active schedule map pool replaces the managed server rotation', async () => {
+    const service = new MapVotingService(1);
+    let appliedRotationMapIds = null;
+
+    service.blacklist = ['kursk_warfare'];
+    service.crcon = {
+        replaceMapRotation: async (mapIds) => {
+            appliedRotationMapIds = mapIds;
+        }
+    };
+    service.getActiveScheduleSettings = () => ({
+        whitelist: ['utahbeach_warfare', 'omahabeach_warfare', 'kursk_warfare']
+    });
+    service.getAllMaps = async () => ([
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day' },
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day' },
+        { id: 'kursk_warfare', pretty_name: 'Kursk Warfare', game_mode: 'warfare', environment: 'day' }
+    ]);
+
+    const applied = await service.loadScheduleMapPoolAsRotation();
+
+    assert.equal(applied, true);
+    assert.deepEqual(appliedRotationMapIds, ['utahbeach_warfare', 'omahabeach_warfare']);
+    assert.deepEqual(service.managedRotationPoolMapIds, ['utahbeach_warfare', 'omahabeach_warfare']);
 });

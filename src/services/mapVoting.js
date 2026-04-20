@@ -99,6 +99,7 @@ class MapVotingService {
         this.skipNextUnseededMatchEndRotation = false;
         this.pendingQueuedMapMaxHoldMs = 3 * 60 * 60 * 1000;
         this.lastObservedSessionRemainingMatchTime = null;
+        this.managedRotationPoolMapIds = [];
     }
 
     // ==================== INITIALIZATION ====================
@@ -585,6 +586,7 @@ class MapVotingService {
 
         // Clear cache to pick up new whitelist
         this.clearCache();
+        await this.syncManagedRotationPool(schedule);
         this.pendingScheduleTransition = false;
     }
 
@@ -714,6 +716,78 @@ class MapVotingService {
 
         // Otherwise use CRCON whitelist
         return await this.getWhitelist();
+    }
+
+    async getManagedRotationPoolMapIds(schedule = null, allMaps = null) {
+        const resolvedSchedule = schedule || this.getActiveScheduleSettings();
+        const resolvedMaps = allMaps || await this.getAllMaps();
+        const availableMapIds = new Set(resolvedMaps.map((map) => map.id));
+        let poolMapIds = [];
+
+        if (Array.isArray(resolvedSchedule?.whitelist) && resolvedSchedule.whitelist.length > 0) {
+            poolMapIds = resolvedSchedule.whitelist.filter((mapId) => availableMapIds.has(mapId));
+        } else {
+            const effectiveWhitelist = await this.getEffectiveWhitelist();
+            poolMapIds = resolvedMaps
+                .filter((map) => !effectiveWhitelist || effectiveWhitelist.has(map.id))
+                .map((map) => map.id);
+        }
+
+        return [...new Set(poolMapIds.filter((mapId) => !this.blacklist.includes(mapId)))];
+    }
+
+    buildManagedRotationOrder(poolMapIds, selectedMapId = null) {
+        const uniquePoolMapIds = [...new Set((poolMapIds || []).filter(Boolean))];
+        if (!selectedMapId) {
+            return uniquePoolMapIds;
+        }
+
+        const remainingMapIds = uniquePoolMapIds.filter((mapId) => mapId !== selectedMapId);
+        return [selectedMapId, ...remainingMapIds];
+    }
+
+    async syncManagedRotationPool(schedule = null, allMaps = null) {
+        if (typeof this.crcon?.replaceMapRotation !== 'function') {
+            throw new Error('CRCON replaceMapRotation support is required for bot-managed map pools');
+        }
+
+        const poolMapIds = await this.getManagedRotationPoolMapIds(schedule, allMaps);
+        if (poolMapIds.length === 0) {
+            logger.warn(`[MapVoting S${this.serverNum}] Active schedule map pool resolved to zero maps; skipping managed rotation sync`);
+            this.managedRotationPoolMapIds = [];
+            return false;
+        }
+
+        await this.crcon.replaceMapRotation(poolMapIds);
+        this.managedRotationPoolMapIds = poolMapIds;
+        logger.info(
+            `[MapVoting S${this.serverNum}] Synced managed rotation pool with ${poolMapIds.length} map(s): ${poolMapIds.join(', ')}`
+        );
+        return true;
+    }
+
+    async loadScheduleMapPoolAsRotation(schedule = null, allMaps = null) {
+        return this.syncManagedRotationPool(schedule, allMaps);
+    }
+
+    async applyManagedRotationSelection(selectedMapId, source = 'unknown', schedule = null, allMaps = null) {
+        if (!selectedMapId) {
+            throw new Error('applyManagedRotationSelection requires a selected map id');
+        }
+
+        if (typeof this.crcon?.replaceMapRotation !== 'function') {
+            throw new Error('CRCON replaceMapRotation support is required for vote-driven rotation management');
+        }
+
+        const basePoolMapIds = this.managedRotationPoolMapIds.length > 0
+            ? this.managedRotationPoolMapIds
+            : await this.getManagedRotationPoolMapIds(schedule, allMaps);
+        const rotationOrder = this.buildManagedRotationOrder(basePoolMapIds, selectedMapId);
+
+        await this.crcon.replaceMapRotation(rotationOrder);
+        this.managedRotationPoolMapIds = rotationOrder;
+        this.setPendingQueuedMap(selectedMapId, source);
+        return rotationOrder;
     }
 
     // ==================== POLLING ====================
@@ -1194,8 +1268,12 @@ class MapVotingService {
                 );
             }
 
-            await this.crcon.queueNextMap(selectedMap.id);
-            this.setPendingQueuedMap(selectedMap.id, 'non-seeded-rotation');
+            await this.applyManagedRotationSelection(
+                selectedMap.id,
+                'non-seeded-rotation',
+                this.getActiveScheduleSettings(),
+                allMaps
+            );
             logger.info(`[MapVoting S${this.serverNum}] Applied non-seeded rotation map: ${selectedMap.id}`);
             return true;
         } catch (error) {
@@ -1358,19 +1436,13 @@ class MapVotingService {
                     `[MapVoting S${this.serverNum}] Vote finalization context: currentMap=${currentMapId || 'unknown'} recentExcluded=${recentExcludedSummary} selected=${mapId}`
                 );
 
-                if (queueStrategy === 'direct-sequence-start') {
-                    if (typeof this.crcon?.queueNextMapAtSequenceStart !== 'function') {
-                        throw new Error('Direct RCON sequence-start queueing is not available');
-                    }
-
-                    logger.info(`[MapVoting S${this.serverNum}] Queueing next map from session timer at sequence position 0: ${mapId}`);
-                    await this.crcon.queueNextMapAtSequenceStart(mapId);
-                    this.setPendingQueuedMap(mapId, 'vote-result-session-zero');
-                } else {
-                    logger.info(`[MapVoting S${this.serverNum}] Setting next map: ${mapId}`);
-                    await this.crcon.queueNextMap(mapId);
-                    this.setPendingQueuedMap(mapId, 'vote-result');
-                }
+                logger.info(`[MapVoting S${this.serverNum}] Applying selected map to managed rotation: ${mapId}`);
+                await this.applyManagedRotationSelection(
+                    mapId,
+                    queueStrategy === 'direct-sequence-start' ? 'vote-result-session-zero' : 'vote-result',
+                    this.getActiveScheduleSettings(),
+                    allMaps
+                );
             } else {
                 logger.warn(`[MapVoting S${this.serverNum}] Could not determine next map`);
             }
@@ -1753,6 +1825,7 @@ class MapVotingService {
         this.skipNextUnseededMatchEndRotation = false;
         this.lastVoteStartedForCurrentMapId = null;
         this.lastObservedSessionRemainingMatchTime = null;
+        this.managedRotationPoolMapIds = [];
     }
 
     getStatus() {
