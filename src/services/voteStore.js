@@ -206,7 +206,14 @@ class VoteStore {
         let cleaned = 0;
 
         for (const key of Object.keys(this.votes)) {
-            if (this.votes[key].createdAt < cutoff) {
+            const entry = this.votes[key];
+            const createdAt = entry && typeof entry === 'object' ? entry.createdAt : null;
+
+            if (!Number.isFinite(createdAt)) {
+                continue;
+            }
+
+            if (createdAt < cutoff) {
                 delete this.votes[key];
                 cleaned++;
             }
