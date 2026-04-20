@@ -32,12 +32,14 @@ class MapVotingService {
         this.maps = null;
         this.voteResults = [];
 
-        // Seeding state
+        // Vote activation state.
+        // `minimumPlayers` is the gate for opening map voting, while
+        // `deactivatePlayers` provides hysteresis so the bot does not flap.
         this.seeded = false;
         this.seedingMessage = null;
         this.sendSeedingMessage = true;
-        this.minimumPlayers = 50;
-        this.deactivatePlayers = 40;
+        this.minimumPlayers = 25;
+        this.deactivatePlayers = 10;
 
         // Reminder state
         this.lastReminderTime = null;
@@ -1008,6 +1010,41 @@ class MapVotingService {
             .filter(Boolean);
     }
 
+    getGeneralMapName(map) {
+        const explicitName = map?.map_name ||
+            map?.map?.name ||
+            map?.name ||
+            null;
+
+        if (explicitName) {
+            return explicitName;
+        }
+
+        const prettyName = map?.pretty_name || map?.id || null;
+        if (!prettyName) {
+            return null;
+        }
+
+        return String(prettyName)
+            .replace(/\s+\|\s+.+$/i, '')
+            .replace(/\s+(warfare|offensive|skirmish)(\s+\(.+\))?$/i, '')
+            .replace(/\s+offensive\s+\(.+\)$/i, '')
+            .replace(/\s+\(.+\)$/i, '')
+            .trim() || prettyName;
+    }
+
+    getGeneralMapKey(map) {
+        return this.normalizeMapKey(this.getGeneralMapName(map));
+    }
+
+    buildMapLookupById(allMaps) {
+        return new Map(
+            (allMaps || [])
+                .filter((map) => map?.id)
+                .map((map) => [map.id, map])
+        );
+    }
+
     buildCanonicalMapLookup(allMaps) {
         const lookup = new Map();
 
@@ -1020,8 +1057,9 @@ class MapVotingService {
         return lookup;
     }
 
-    getRecentMapIds(historyEntries, canonicalMapLookup) {
+    getRecentMapExclusions(historyEntries, canonicalMapLookup, mapLookupById) {
         const recentMapIds = new Set();
+        const recentGeneralMapKeys = new Set();
 
         for (const entry of historyEntries) {
             const aliases = [
@@ -1037,11 +1075,21 @@ class MapVotingService {
                 .filter(Boolean);
 
             for (const alias of aliases) {
-                recentMapIds.add(canonicalMapLookup.get(alias) || alias);
+                const resolvedMapId = canonicalMapLookup.get(alias) || alias;
+                recentMapIds.add(resolvedMapId);
+
+                const resolvedMap = mapLookupById.get(resolvedMapId);
+                const generalMapKey = this.getGeneralMapKey(resolvedMap || entry);
+                if (generalMapKey) {
+                    recentGeneralMapKeys.add(generalMapKey);
+                }
             }
         }
 
-        return recentMapIds;
+        return {
+            recentMapIds,
+            recentGeneralMapKeys
+        };
     }
 
     resolveMapIdFromPayload(mapPayload, canonicalMapLookup) {
@@ -1117,25 +1165,61 @@ class MapVotingService {
         return null;
     }
 
-    async getRecentExcludedMapIds(allMaps) {
+    async getRecentExclusionContext(allMaps, options = {}) {
+        const {
+            requireCurrentMap = false,
+            requireHistory = false
+        } = options;
         const canonicalMapLookup = this.buildCanonicalMapLookup(allMaps);
+        const mapLookupById = this.buildMapLookupById(allMaps);
         let recentMapIds = new Set();
+        let recentGeneralMapKeys = new Set();
+        let historyAvailable = this.excludeRecentMaps <= 0;
+
         try {
-            const historyResponse = await this.crcon.getMapHistory();
-            if (historyResponse?.result && Array.isArray(historyResponse.result)) {
-                const recentMaps = historyResponse.result.slice(0, this.excludeRecentMaps);
-                recentMapIds = this.getRecentMapIds(recentMaps, canonicalMapLookup);
+            if (this.excludeRecentMaps > 0) {
+                const historyResponse = await this.crcon.getMapHistory();
+                if (Array.isArray(historyResponse?.result)) {
+                    const recentMaps = historyResponse.result.slice(0, this.excludeRecentMaps);
+                    const exclusions = this.getRecentMapExclusions(recentMaps, canonicalMapLookup, mapLookupById);
+                    recentMapIds = exclusions.recentMapIds;
+                    recentGeneralMapKeys = exclusions.recentGeneralMapKeys;
+                    historyAvailable = true;
+                }
             }
         } catch (e) {
             logger.warn(`[MapVoting S${this.serverNum}] Could not fetch map history: ${e.message}`);
         }
 
         const currentMapId = await this.getCurrentMapId(allMaps, canonicalMapLookup);
+        const currentMap = currentMapId ? mapLookupById.get(currentMapId) : null;
+        const currentGeneralMapKey = this.getGeneralMapKey(currentMap);
         if (currentMapId) {
             recentMapIds.add(currentMapId);
         }
+        if (currentGeneralMapKey) {
+            recentGeneralMapKeys.add(currentGeneralMapKey);
+        }
 
-        return recentMapIds;
+        const hasExactRepeatProtection = historyAvailable || Boolean(currentMapId);
+        const reliable = (!requireHistory || historyAvailable || Boolean(currentMapId)) &&
+            (!requireCurrentMap || hasExactRepeatProtection);
+
+        return {
+            recentMapIds,
+            recentGeneralMapKeys,
+            currentMapId,
+            currentGeneralMapKey,
+            historyAvailable,
+            hasExactRepeatProtection,
+            reliable
+        };
+    }
+
+    async getRecentExcludedMapIds(allMaps) {
+        const exclusionContext = await this.getRecentExclusionContext(allMaps);
+
+        return exclusionContext.recentMapIds;
     }
 
     async getMapsToVote() {
@@ -1145,11 +1229,32 @@ class MapVotingService {
                 return null;
             }
 
-            const recentMapIds = await this.getRecentExcludedMapIds(allMaps);
-            const currentMapId = await this.getCurrentMapId(allMaps);
+            const exclusionContext = await this.getRecentExclusionContext(allMaps, {
+                requireHistory: this.excludeRecentMaps > 0,
+                requireCurrentMap: true
+            });
+            const {
+                recentMapIds,
+                recentGeneralMapKeys,
+                currentMapId,
+                currentGeneralMapKey,
+                historyAvailable,
+                hasExactRepeatProtection,
+                reliable
+            } = exclusionContext;
+
+            if (!reliable) {
+                logger.warn(
+                    `[MapVoting S${this.serverNum}] Skipping vote generation because map exclusions were not reliable: historyAvailable=${historyAvailable} currentMapId=${currentMapId || 'unknown'} exactProtection=${hasExactRepeatProtection}`
+                );
+                return [];
+            }
 
             if (recentMapIds.size > 0) {
                 logger.info(`[MapVoting S${this.serverNum}] Excluding ${recentMapIds.size} recent map IDs: ${[...recentMapIds].join(', ')}`);
+            }
+            if (recentGeneralMapKeys.size > 0) {
+                logger.info(`[MapVoting S${this.serverNum}] Excluding ${recentGeneralMapKeys.size} recent base maps: ${[...recentGeneralMapKeys].join(', ')}`);
             }
 
             // Use effective whitelist (schedule's or CRCON's)
@@ -1158,11 +1263,13 @@ class MapVotingService {
 
             // Filter available maps
             const availableMaps = allMaps.filter(map => {
+                const generalMapKey = this.getGeneralMapKey(map);
                 if (useWhitelist && !whitelist.has(map.id)) return false;
                 if (this.blacklist.includes(map.id)) return false;
                 if (map.game_mode === 'skirmish' && this.modeWeights.skirmish === 0) return false;
                 // Exclude recently played maps
                 if (recentMapIds.has(map.id)) return false;
+                if (generalMapKey && recentGeneralMapKeys.has(generalMapKey)) return false;
                 return true;
             });
 
@@ -1185,6 +1292,7 @@ class MapVotingService {
             // Select maps (capped at mapsPerVote)
             const result = [];
             const usedMapIds = new Set();
+            const usedGeneralMapKeys = new Set(currentGeneralMapKey ? [currentGeneralMapKey] : []);
             const dayMapsNeeded = this.mapsPerVote - this.nightMapCount;
 
             const shuffledDayMapsByMode = {
@@ -1199,21 +1307,32 @@ class MapVotingService {
 
                 for (let i = 0; i < modeWeight && i < weightedDayMaps.length && result.length < dayMapsNeeded; i++) {
                     const map = weightedDayMaps[i];
-                    if (!usedMapIds.has(map.id)) {
+                    const generalMapKey = this.getGeneralMapKey(map);
+                    if (!usedMapIds.has(map.id) && (!generalMapKey || !usedGeneralMapKeys.has(generalMapKey))) {
                         result.push(this.formatMapForVote(map));
                         usedMapIds.add(map.id);
+                        if (generalMapKey) {
+                            usedGeneralMapKeys.add(generalMapKey);
+                        }
                     }
                 }
             }
 
             // Night maps
             const allNightMaps = [...mapsByMode.warfare.night, ...mapsByMode.offensive.night, ...mapsByMode.skirmish.night]
-                .filter(m => !usedMapIds.has(m.id));
+                .filter((map) => {
+                    const generalMapKey = this.getGeneralMapKey(map);
+                    return !usedMapIds.has(map.id) && (!generalMapKey || !usedGeneralMapKeys.has(generalMapKey));
+                });
             const nightMaps = this.shuffleArray(allNightMaps);
 
             for (let i = 0; i < this.nightMapCount && i < nightMaps.length && result.length < this.mapsPerVote; i++) {
                 result.push(this.formatMapForVote(nightMaps[i]));
                 usedMapIds.add(nightMaps[i].id);
+                const generalMapKey = this.getGeneralMapKey(nightMaps[i]);
+                if (generalMapKey) {
+                    usedGeneralMapKeys.add(generalMapKey);
+                }
             }
 
             // Fill remaining slots with day maps if needed
@@ -1223,11 +1342,18 @@ class MapVotingService {
                     ...shuffledDayMapsByMode.offensive,
                     ...shuffledDayMapsByMode.skirmish
                 ]
-                    .filter(m => !usedMapIds.has(m.id));
+                    .filter((map) => {
+                        const generalMapKey = this.getGeneralMapKey(map);
+                        return !usedMapIds.has(map.id) && (!generalMapKey || !usedGeneralMapKeys.has(generalMapKey));
+                    });
                 for (const map of remainingDay) {
                     if (result.length >= this.mapsPerVote) break;
                     result.push(this.formatMapForVote(map));
                     usedMapIds.add(map.id);
+                    const generalMapKey = this.getGeneralMapKey(map);
+                    if (generalMapKey) {
+                        usedGeneralMapKeys.add(generalMapKey);
+                    }
                 }
             }
 
@@ -1284,12 +1410,40 @@ class MapVotingService {
                 return false;
             }
 
-            const recentMapIds = await this.getRecentExcludedMapIds(allMaps);
-            const currentMapId = await this.getCurrentMapId(allMaps);
+            const exclusionContext = await this.getRecentExclusionContext(allMaps, {
+                requireHistory: this.excludeRecentMaps > 0,
+                requireCurrentMap: true
+            });
+            const {
+                recentMapIds,
+                recentGeneralMapKeys,
+                currentMapId,
+                currentGeneralMapKey,
+                historyAvailable,
+                hasExactRepeatProtection,
+                reliable
+            } = exclusionContext;
+
+            if (!reliable) {
+                logger.warn(
+                    `[MapVoting S${this.serverNum}] Skipping non-seeded rotation because map exclusions were not reliable: historyAvailable=${historyAvailable} currentMapId=${currentMapId || 'unknown'} exactProtection=${hasExactRepeatProtection}`
+                );
+                return false;
+            }
+
             const alternateMaps = currentMapId
                 ? configuredMaps.filter(map => map.id !== currentMapId)
                 : configuredMaps;
-            const cooldownEligibleMaps = alternateMaps.filter(map => !recentMapIds.has(map.id));
+            const cooldownEligibleMaps = alternateMaps.filter((map) => {
+                const generalMapKey = this.getGeneralMapKey(map);
+                if (recentMapIds.has(map.id)) {
+                    return false;
+                }
+                if (generalMapKey && recentGeneralMapKeys.has(generalMapKey) && generalMapKey !== currentGeneralMapKey) {
+                    return false;
+                }
+                return true;
+            });
             const selectionPool = cooldownEligibleMaps.length > 0
                 ? cooldownEligibleMaps
                 : alternateMaps.length > 0
@@ -1374,8 +1528,20 @@ class MapVotingService {
         }
     }
 
-    async getVoteResult(mapResults, candidateMaps = this.maps, currentMapId = null) {
+    async getVoteResult(mapResults, candidateMaps = this.maps, options = null) {
         try {
+            const currentMapId = typeof options === 'string' || options === null
+                ? options
+                : options?.currentMapId || null;
+            const currentGeneralMapKey = typeof options === 'object' && options !== null
+                ? options.currentGeneralMapKey || null
+                : null;
+            const recentMapIds = typeof options === 'object' && options !== null
+                ? options.recentMapIds || new Set()
+                : new Set();
+            const recentGeneralMapKeys = typeof options === 'object' && options !== null
+                ? options.recentGeneralMapKeys || new Set()
+                : new Set();
             const candidateMapByVoteLabel = new Map(
                 (candidateMaps || []).flatMap((map) => {
                     const entries = [[this.getVoteLabel(map), map]];
@@ -1395,9 +1561,28 @@ class MapVotingService {
                     continue;
                 }
 
+                const matchingGeneralMapKey = this.getGeneralMapKey(matchingMap);
+
                 if (currentMapId && matchingMap.id === currentMapId) {
                     logger.warn(
                         `[MapVoting S${this.serverNum}] Ignoring poll winner candidate because it matches the live current map: ${matchingMap.id}`
+                    );
+                    continue;
+                }
+
+                if (recentMapIds.has(matchingMap.id)) {
+                    logger.warn(
+                        `[MapVoting S${this.serverNum}] Ignoring poll winner candidate because it is still in exact-layer cooldown: ${matchingMap.id}`
+                    );
+                    continue;
+                }
+
+                if (matchingGeneralMapKey && recentGeneralMapKeys.has(matchingGeneralMapKey)) {
+                    const reason = matchingGeneralMapKey === currentGeneralMapKey
+                        ? 'it repeats the live base map'
+                        : 'it is still in base-map cooldown';
+                    logger.warn(
+                        `[MapVoting S${this.serverNum}] Ignoring poll winner candidate because ${reason}: ${matchingMap.id}`
                     );
                     continue;
                 }
@@ -1461,25 +1646,70 @@ class MapVotingService {
 
         try {
             const allMaps = await this.getAllMaps();
-            const recentMapIds = allMaps?.length > 0 ? await this.getRecentExcludedMapIds(allMaps) : new Set();
-            const currentMapId = allMaps?.length > 0 ? await this.getCurrentMapId(allMaps) : null;
+            const exclusionContext = allMaps?.length > 0
+                ? await this.getRecentExclusionContext(allMaps, {
+                    requireHistory: this.excludeRecentMaps > 0,
+                    requireCurrentMap: true
+                })
+                : {
+                    recentMapIds: new Set(),
+                    recentGeneralMapKeys: new Set(),
+                    currentMapId: null,
+                    currentGeneralMapKey: null,
+                    historyAvailable: false,
+                    hasExactRepeatProtection: false,
+                    reliable: false
+                };
+            const {
+                recentMapIds,
+                recentGeneralMapKeys,
+                currentMapId,
+                currentGeneralMapKey,
+                historyAvailable,
+                hasExactRepeatProtection,
+                reliable
+            } = exclusionContext;
             const currentPollMaps = await this.getCurrentPollMaps(allMaps);
             const candidateMaps = currentPollMaps.length > 0 ? currentPollMaps : (Array.isArray(this.maps) ? this.maps : []);
             const mapResults = await this.getResults();
             let mapId = null;
 
+            if (allMaps?.length > 0 && !reliable) {
+                throw new Error(
+                    `Could not reliably resolve current/recent map exclusions for vote finalization (historyAvailable=${historyAvailable} currentMapId=${currentMapId || 'unknown'} exactProtection=${hasExactRepeatProtection})`
+                );
+            }
+
             if (mapResults) {
-                mapId = await this.getVoteResult(mapResults, candidateMaps, currentMapId);
+                mapId = await this.getVoteResult(mapResults, candidateMaps, {
+                    currentMapId,
+                    currentGeneralMapKey,
+                    recentMapIds,
+                    recentGeneralMapKeys
+                });
             }
 
             // If no vote result (0 votes or error), pick random from available maps
             if (!mapId && candidateMaps.length > 0) {
-                const fallbackCandidateMaps = currentMapId
-                    ? candidateMaps.filter((candidateMap) => candidateMap.id !== currentMapId)
-                    : candidateMaps;
+                const fallbackCandidateMaps = candidateMaps.filter((candidateMap) => {
+                    const candidateGeneralMapKey = this.getGeneralMapKey(candidateMap);
+                    if (currentMapId && candidateMap.id === currentMapId) {
+                        return false;
+                    }
+                    if (recentMapIds.has(candidateMap.id)) {
+                        return false;
+                    }
+                    if (candidateGeneralMapKey && recentGeneralMapKeys.has(candidateGeneralMapKey)) {
+                        return false;
+                    }
+                    return true;
+                });
                 const randomSelectionPool = fallbackCandidateMaps.length > 0
                     ? fallbackCandidateMaps
-                    : candidateMaps;
+                    : [];
+                if (randomSelectionPool.length === 0) {
+                    throw new Error('No eligible vote candidates remained after applying current-map and cooldown exclusions');
+                }
                 const randomIndex = Math.floor(Math.random() * randomSelectionPool.length);
                 mapId = randomSelectionPool[randomIndex].id;
                 logger.info(`[MapVoting S${this.serverNum}] No votes cast, picking random: ${mapId}`);
@@ -1918,10 +2148,10 @@ class MapVotingService {
     setConfig(key, value) {
         switch (key) {
             case 'minimumPlayers':
-                this.minimumPlayers = parseInt(value) || 50;
+                this.minimumPlayers = parseInt(value) || 25;
                 break;
             case 'deactivatePlayers':
-                this.deactivatePlayers = parseInt(value) || 40;
+                this.deactivatePlayers = parseInt(value) || 10;
                 break;
             case 'mapsPerVote':
                 this.mapsPerVote = parseInt(value) || 8;

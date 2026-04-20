@@ -39,7 +39,7 @@ class SchedulePanelService {
             startTime: '18:00',
             endTime: '23:00',
             days: [...scheduleManager.getDayPresets().all],
-            minimumPlayers: 40,
+            minimumPlayers: 25,
             mapsPerVote: 6
         };
     }
@@ -54,7 +54,7 @@ class SchedulePanelService {
             days: Array.isArray(schedule.days) && schedule.days.length > 0
                 ? [...schedule.days]
                 : [...scheduleManager.getDayPresets().all],
-            minimumPlayers: schedule.settings?.minimumPlayers ?? 40,
+            minimumPlayers: schedule.settings?.minimumPlayers ?? 25,
             mapsPerVote: schedule.settings?.mapsPerVote ?? 6
         };
     }
@@ -1316,7 +1316,7 @@ class SchedulePanelService {
             .setLabel('Minimum Players to Activate')
             .setStyle(TextInputStyle.Short)
             .setPlaceholder('e.g., 40')
-            .setValue(String(draft.minimumPlayers ?? 40))
+            .setValue(String(draft.minimumPlayers ?? 25))
             .setRequired(true)
             .setMaxLength(3);
 
@@ -1378,7 +1378,7 @@ class SchedulePanelService {
             .setLabel('Minimum Players to Activate')
             .setStyle(TextInputStyle.Short)
             .setPlaceholder('e.g., 40')
-            .setValue(String(existingSchedule?.settings?.minimumPlayers || 40))
+            .setValue(String(existingSchedule?.settings?.minimumPlayers || 25))
             .setRequired(true)
             .setMaxLength(3);
 

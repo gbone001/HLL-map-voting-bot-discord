@@ -801,8 +801,15 @@ test('vote finalization random fallback uses live poll options instead of stale 
         { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Utah Beach' } },
         { id: 'kursk_warfare', pretty_name: 'Kursk Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Kursk' } }
     ]);
-    service.getRecentExcludedMapIds = async () => new Set();
-    service.getCurrentMapId = async () => null;
+    service.getRecentExclusionContext = async () => ({
+        recentMapIds: new Set(),
+        recentGeneralMapKeys: new Set(),
+        currentMapId: null,
+        currentGeneralMapKey: null,
+        historyAvailable: true,
+        hasExactRepeatProtection: true,
+        reliable: true
+    });
     service.getResults = async () => null;
 
     Math.random = () => 0.99;
@@ -857,6 +864,95 @@ test('vote finalization uses the live Discord poll winner and queues that map', 
 
     assert.equal(mapId, 'omahabeach_warfare');
     assert.equal(queuedMapId, 'omahabeach_warfare');
+});
+
+test('vote finalization skips same-base-map winners that repeat the live map', async () => {
+    const service = new MapVotingService(1);
+    let queuedMapId = null;
+
+    service.voteMessageId = 'poll-message-same-base-map';
+    service.maps = [
+        { id: 'carentan_offensive_us', pretty_name: 'Carentan Offensive (US)', vote_label: 'Carentan | Offensive | Allies' },
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', vote_label: 'Utah Beach | Warfare | Day' }
+    ];
+    service.channel = {
+        messages: {
+            fetch: async () => ({
+                poll: {
+                    answers: new Map([
+                        ['1', { text: 'Carentan | Offensive | Allies', voteCount: 4 }],
+                        ['2', { text: 'Utah Beach | Warfare | Day', voteCount: 3 }]
+                    ])
+                }
+            })
+        }
+    };
+    service.crcon = {
+        queueNextMap: async (mapId) => {
+            queuedMapId = mapId;
+        }
+    };
+    service.getAllMaps = async () => ([
+        { id: 'carentan_warfare', pretty_name: 'Carentan Warfare', game_mode: 'warfare', environment: 'day', map_name: 'Carentan', map: { name: 'Carentan' } },
+        { id: 'carentan_offensive_us', pretty_name: 'Carentan Offensive (US)', game_mode: 'offensive', environment: 'day', map_name: 'Carentan', map: { name: 'Carentan' } },
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day', map_name: 'Utah Beach', map: { name: 'Utah Beach' } }
+    ]);
+    service.getCurrentPollMaps = async () => service.maps;
+    service.getResults = async () => [
+        ['Carentan | Offensive | Allies', 4],
+        ['Utah Beach | Warfare | Day', 3]
+    ];
+    service.getRecentExclusionContext = async () => ({
+        recentMapIds: new Set(['carentan_warfare']),
+        recentGeneralMapKeys: new Set(['carentan']),
+        currentMapId: 'carentan_warfare',
+        currentGeneralMapKey: 'carentan',
+        historyAvailable: true,
+        reliable: true
+    });
+
+    const mapId = await service.setVoteResult();
+
+    assert.equal(mapId, 'utahbeach_warfare');
+    assert.equal(queuedMapId, 'utahbeach_warfare');
+});
+
+test('vote finalization fails closed when current map exclusions are not reliable', async () => {
+    const service = new MapVotingService(1);
+
+    service.voteMessageId = 'poll-message-unreliable-exclusions';
+    service.maps = [
+        { id: 'carentan_warfare', pretty_name: 'Carentan Warfare', vote_label: 'Carentan | Warfare | Day' }
+    ];
+    service.channel = {
+        messages: {
+            fetch: async () => ({
+                poll: {
+                    answers: new Map([
+                        ['1', { text: 'Carentan | Warfare | Day', voteCount: 1 }]
+                    ])
+                }
+            })
+        }
+    };
+    service.getAllMaps = async () => ([
+        { id: 'carentan_warfare', pretty_name: 'Carentan Warfare', game_mode: 'warfare', environment: 'day', map_name: 'Carentan', map: { name: 'Carentan' } }
+    ]);
+    service.getCurrentPollMaps = async () => service.maps;
+    service.getResults = async () => [['Carentan | Warfare | Day', 1]];
+    service.getRecentExclusionContext = async () => ({
+        recentMapIds: new Set(),
+        recentGeneralMapKeys: new Set(),
+        currentMapId: null,
+        currentGeneralMapKey: null,
+        historyAvailable: true,
+        reliable: false
+    });
+
+    await assert.rejects(
+        () => service.setVoteResult(),
+        /Could not reliably resolve current\/recent map exclusions/
+    );
 });
 
 test('vote finalization random fallback excludes the live current map when no votes were cast', async () => {

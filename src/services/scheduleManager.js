@@ -154,7 +154,7 @@ class ScheduleManager {
             createdAt: schedule.createdAt || new Date(0).toISOString(),
             updatedAt: schedule.updatedAt,
             settings: {
-                minimumPlayers: schedule.settings?.minimumPlayers ?? 40,
+                minimumPlayers: schedule.settings?.minimumPlayers ?? 25,
                 deactivatePlayers: schedule.settings?.deactivatePlayers ?? 10,
                 mapsPerVote: schedule.settings?.mapsPerVote ?? 6,
                 nightMapCount: schedule.settings?.nightMapCount ?? 1
@@ -445,7 +445,7 @@ class ScheduleManager {
             enabled: true,
             createdAt: new Date().toISOString(),
             settings: {
-                minimumPlayers: scheduleData.minimumPlayers ?? 40,
+                minimumPlayers: scheduleData.minimumPlayers ?? 25,
                 deactivatePlayers: scheduleData.deactivatePlayers ?? 10,
                 mapsPerVote: scheduleData.mapsPerVote ?? 6,
                 nightMapCount: scheduleData.nightMapCount ?? 1

@@ -99,8 +99,8 @@ test('map vote settings panel shows local catalog status and manual sync button'
     const fakeMapVotingService = {
         getConfig() {
             return {
-                minimumPlayers: 50,
-                deactivatePlayers: 40,
+                minimumPlayers: 25,
+                deactivatePlayers: 10,
                 mapsPerVote: 6,
                 nightMapCount: 1,
                 modeWeights: {
