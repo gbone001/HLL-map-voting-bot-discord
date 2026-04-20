@@ -699,11 +699,24 @@ class CRCONService {
         for (const map of maps) {
             for (const alias of [
                 map.id,
+                map.vote_label,
                 map.pretty_name,
+                map.map?.pretty_name
+            ]) {
+                const normalized = normalizeMapValue(alias);
+                if (normalized && !lookup.has(normalized)) {
+                    lookup.set(normalized, map.id);
+                }
+            }
+
+            if (map.game_mode !== 'warfare') {
+                continue;
+            }
+
+            for (const alias of [
                 map.map?.name,
-                map.map?.pretty_name,
-                map.id?.replace(/_warfare$/i, ''),
-                map.pretty_name?.replace(/\s+warfare$/i, '')
+                map.id?.replace(/_(warfare|offensive|skirmish)(_.+)?$/i, ''),
+                map.pretty_name?.replace(/\s+(warfare|offensive|skirmish)(\s+\(.+\))?$/i, '')
             ]) {
                 const normalized = normalizeMapValue(alias);
                 if (normalized && !lookup.has(normalized)) {
@@ -939,6 +952,9 @@ class CRCONService {
         const payload = responseData?.result || responseData || {};
         const currentMapId = this.resolveMapIdFromValues([
             payload.current_map?.id,
+            payload.current_map?.map?.id,
+            payload.current_map?.map?.pretty_name,
+            payload.current_map?.map?.name,
             payload.current_map?.pretty_name,
             payload.current_map?.name,
             payload.currentMap,
@@ -948,6 +964,9 @@ class CRCONService {
         ]);
         const nextMapId = this.resolveMapIdFromValues([
             payload.next_map?.id,
+            payload.next_map?.map?.id,
+            payload.next_map?.map?.pretty_name,
+            payload.next_map?.map?.name,
             payload.next_map?.pretty_name,
             payload.next_map?.name,
             payload.nextMap,
@@ -1046,18 +1065,6 @@ class CRCONService {
         };
 
         if (queuedState?.nextMapId && !this.areMapReferencesEquivalent(queuedState.nextMapId, mapId)) {
-            if (!queuedState.authoritative) {
-                logger.warn(
-                    `[CRCON ${this.serverName}] Advisory queued-map mismatch after set_map_rotation: expected=${mapId} observed=${queuedState.nextMapId} source=${queuedState.source}`
-                );
-
-                return {
-                    response,
-                    queuedState,
-                    verification
-                };
-            }
-
             throw new Error(
                 `Queued next map mismatch: expected ${mapId} but observed ${queuedState.nextMapId} via ${queuedState.source}`
             );
@@ -1176,7 +1183,11 @@ class CRCONService {
             throw new Error('replaceMapRotation requires at least one valid map id');
         }
 
-        if (this.hasApiConfigured()) {
+        const apiExecutor = async () => {
+            if (!this.client) {
+                throw new Error(`CRCON API is not configured for ${this.serverName}`);
+            }
+
             const response = await this.client.post('/api/set_map_rotation', {
                 map_names: desiredMapIds
             });
@@ -1186,17 +1197,21 @@ class CRCONService {
                 response: response.data,
                 rotationMapIds: desiredMapIds
             };
-        }
+        };
 
-        if (this.hasDirectRconConfigured()) {
+        const directExecutor = async () => {
+            if (!this.hasDirectRconConfigured()) {
+                throw new Error(`Direct RCON is not configured for ${this.serverName}`);
+            }
+
             const response = await this.replaceDirectMapRotation(desiredMapIds);
             return {
                 response,
                 rotationMapIds: desiredMapIds
             };
-        }
+        };
 
-        throw new Error(`Map rotation replacement is not configured for ${this.serverName}`);
+        return this.executeWithTransport('post', 'set_map_rotation', apiExecutor, directExecutor);
     }
 
     getLocalMapCatalogStatus() {
@@ -1474,6 +1489,13 @@ function buildMapStub(mapId, displayName = null) {
         pretty_name: displayName || fallbackId,
         game_mode: 'warfare',
         environment: 'day',
+        map_name: displayName || fallbackId,
+        mode: 'warfare',
+        variant: 'Day',
+        vote_label: `${displayName || fallbackId} | Warfare | Day`,
+        weight: null,
+        seeding: null,
+        stress: null,
         map: {
             id: fallbackId,
             name: displayName || fallbackId,

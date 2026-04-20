@@ -3,7 +3,7 @@ const path = require('path');
 const logger = require('../utils/logger');
 const { getDataFilePath } = require('../utils/dataPath');
 
-const BUNDLED_CATALOG_PATH = path.join(__dirname, '../../data/hll-warfare-map-catalog.json');
+const BUNDLED_CATALOG_PATH = path.join(__dirname, '../../data/hll-map-catalog.json');
 const RUNTIME_CATALOG_FILENAME = 'hll-map-catalog.json';
 
 function normalizeStringValue(value) {
@@ -25,22 +25,189 @@ function normalizeEnvironment(value) {
     return normalized;
 }
 
+function formatEnvironmentVariant(environment) {
+    const normalized = normalizeEnvironment(environment);
+    const label = {
+        day: 'Day',
+        night: 'Night',
+        dawn: 'Dawn',
+        dusk: 'Dusk',
+        rain: 'Rain',
+        overcast: 'Overcast'
+    }[normalized];
+
+    if (label) {
+        return label;
+    }
+
+    return normalized
+        .split(/[\s_-]+/)
+        .filter(Boolean)
+        .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ') || 'Day';
+}
+
+function titleCaseWords(value) {
+    const normalized = normalizeStringValue(value);
+    if (!normalized) {
+        return null;
+    }
+
+    return normalized
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((part) => {
+            if (part === 'st') {
+                return 'St.';
+            }
+
+            return part.charAt(0).toUpperCase() + part.slice(1);
+        })
+        .join(' ')
+        .replace(/\bDu\b/g, 'Du')
+        .replace(/\bLa\b/g, 'La')
+        .replace(/\bLe\b/g, 'Le');
+}
+
+function normalizeMode(value) {
+    return normalizeStringValue(value)?.toLowerCase() || 'warfare';
+}
+
+function deriveMapName(rawEntry, id) {
+    const explicitMapName = normalizeStringValue(rawEntry?.map);
+    if (explicitMapName) {
+        return explicitMapName;
+    }
+
+    const sourceName = normalizeStringValue(
+        rawEntry?.map_name ||
+        rawEntry?.mapName ||
+        rawEntry?.display_name ||
+        rawEntry?.displayName ||
+        rawEntry?.friendly_name ||
+        rawEntry?.friendlyName ||
+        rawEntry?.name
+    );
+
+    if (sourceName) {
+        const strippedName = sourceName
+            .replace(/\s+(warfare|skirmish)$/i, '')
+            .replace(/\s+off\.?\s+(ger|us|gb|rus|cw)$/i, '')
+            .replace(/\s+\((night|dawn|dusk|rain|overcast)\)$/i, '')
+            .trim();
+        return titleCaseWords(strippedName) || strippedName;
+    }
+
+    return titleCaseWords(id.replace(/[_-]+/g, ' ')) || id;
+}
+
+function deriveOffensiveAttacker(id) {
+    const normalizedId = normalizeStringValue(id)?.toLowerCase() || '';
+    if (
+        normalizedId.endsWith('_ger') ||
+        normalizedId.includes('offensiveger') ||
+        normalizedId.includes('_off_ger')
+    ) {
+        return 'Axis';
+    }
+
+    if (
+        normalizedId.endsWith('_us') ||
+        normalizedId.endsWith('_rus') ||
+        normalizedId.endsWith('_cw') ||
+        normalizedId.includes('offensiveus') ||
+        normalizedId.includes('_off_us') ||
+        normalizedId.includes('offensiverus')
+    ) {
+        return 'Allies';
+    }
+
+    return 'Allies';
+}
+
+function deriveVariant(rawEntry, mode, environment, id) {
+    const explicitVariant = normalizeStringValue(rawEntry?.variant);
+    if (explicitVariant) {
+        return explicitVariant;
+    }
+
+    if (mode === 'offensive') {
+        const attacker = deriveOffensiveAttacker(id);
+        const environmentLabel = formatEnvironmentVariant(environment);
+        return environmentLabel === 'Day'
+            ? attacker
+            : `${attacker} (${environmentLabel})`;
+    }
+
+    return formatEnvironmentVariant(environment);
+}
+
+function buildVoteLabel(mapName, mode, variant) {
+    const modeLabel = mode.charAt(0).toUpperCase() + mode.slice(1);
+    return [mapName, modeLabel, variant].filter(Boolean).join(' | ');
+}
+
+function normalizeBooleanPlaceholder(value) {
+    if (value === undefined || value === null || value === '') {
+        return null;
+    }
+
+    if (typeof value === 'boolean') {
+        return value;
+    }
+
+    const normalized = String(value).trim().toLowerCase();
+    if (['true', '1', 'yes'].includes(normalized)) {
+        return true;
+    }
+
+    if (['false', '0', 'no'].includes(normalized)) {
+        return false;
+    }
+
+    return null;
+}
+
+function normalizeNumberPlaceholder(value) {
+    if (value === undefined || value === null || value === '') {
+        return null;
+    }
+
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
 function normalizeCatalogEntry(rawEntry) {
     const id = normalizeStringValue(rawEntry?.id);
     if (!id) {
         return null;
     }
 
-    const type = normalizeStringValue(rawEntry?.type || rawEntry?.game_mode)?.toLowerCase() || 'warfare';
+    const type = normalizeMode(rawEntry?.type || rawEntry?.game_mode || rawEntry?.mode);
     const environment = normalizeEnvironment(rawEntry?.environment);
-    const name = normalizeStringValue(rawEntry?.name) || id;
+    const mapName = deriveMapName(rawEntry, id);
+    const variant = deriveVariant(rawEntry, type, environment, id);
+    const voteLabel = normalizeStringValue(rawEntry?.vote_label || rawEntry?.voteLabel) ||
+        buildVoteLabel(mapName, type, variant);
+    const name = normalizeStringValue(rawEntry?.name) || mapName || id;
     const friendlyName = normalizeStringValue(rawEntry?.friendly_name || rawEntry?.friendlyName) || name;
     const prettyName = normalizeStringValue(rawEntry?.pretty_name || rawEntry?.prettyName) || friendlyName;
+    const weight = normalizeNumberPlaceholder(rawEntry?.weight);
+    const seeding = normalizeBooleanPlaceholder(rawEntry?.seeding);
+    const stress = normalizeBooleanPlaceholder(rawEntry?.stress);
 
     return {
         id,
         type,
         environment,
+        map: mapName,
+        mode: type,
+        variant,
+        vote_label: voteLabel,
+        weight,
+        seeding,
+        stress,
         name,
         friendly_name: friendlyName,
         pretty_name: prettyName
@@ -53,9 +220,16 @@ function toLegacyMapShape(entry) {
         pretty_name: entry.pretty_name,
         game_mode: entry.type,
         environment: entry.environment,
+        map_name: entry.map,
+        mode: entry.mode,
+        variant: entry.variant,
+        vote_label: entry.vote_label,
+        weight: entry.weight,
+        seeding: entry.seeding,
+        stress: entry.stress,
         map: {
             id: entry.id,
-            name: entry.friendly_name,
+            name: entry.map,
             pretty_name: entry.pretty_name
         }
     };
@@ -158,9 +332,16 @@ class HllMapCatalogService {
         const normalizedEntries = this.normalizeEntries(
             (Array.isArray(rawMaps) ? rawMaps : []).map((rawMap) => ({
                 id: rawMap?.id,
-                type: rawMap?.game_mode || rawMap?.type,
+                type: rawMap?.game_mode || rawMap?.type || rawMap?.mode,
                 environment: rawMap?.environment,
                 name: rawMap?.map?.name || rawMap?.name,
+                map: rawMap?.map_name || rawMap?.map?.name || rawMap?.map,
+                mode: rawMap?.mode || rawMap?.game_mode || rawMap?.type,
+                variant: rawMap?.variant,
+                vote_label: rawMap?.vote_label || rawMap?.voteLabel,
+                weight: rawMap?.weight,
+                seeding: rawMap?.seeding,
+                stress: rawMap?.stress,
                 friendly_name: rawMap?.map?.name || rawMap?.friendly_name || rawMap?.name,
                 pretty_name: rawMap?.pretty_name || rawMap?.map?.pretty_name || rawMap?.name
             }))
@@ -208,9 +389,22 @@ class HllMapCatalogService {
         for (const map of this.getMaps()) {
             for (const alias of [
                 map.id,
+                map.vote_label,
                 map.pretty_name,
+                map.map?.pretty_name
+            ]) {
+                const normalizedAlias = this.normalizeLookupKey(alias);
+                if (normalizedAlias && !lookup.has(normalizedAlias)) {
+                    lookup.set(normalizedAlias, map.id);
+                }
+            }
+
+            if (map.game_mode !== 'warfare') {
+                continue;
+            }
+
+            for (const alias of [
                 map.map?.name,
-                map.map?.pretty_name,
                 map.id?.replace(/_(warfare|offensive|skirmish)(_.+)?$/i, ''),
                 map.pretty_name?.replace(/\s+(warfare|offensive|skirmish)(\s+\(.+\))?$/i, '')
             ]) {

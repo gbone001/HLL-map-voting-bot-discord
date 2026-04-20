@@ -224,7 +224,7 @@ test('match snapshot prefers public-info current and next maps over stale get_st
     assert.equal(snapshot.currentPlayers, 88);
 });
 
-test('direct transport map catalog is warfare-only', async () => {
+test('direct transport map catalog includes bundled offensive and skirmish entries', async () => {
     const service = new CRCONService({
         serverName: 'Test Server',
         transportMode: TRANSPORT_MODES.DIRECT_RCON,
@@ -236,9 +236,12 @@ test('direct transport map catalog is warfare-only', async () => {
     service.hasDirectRconConfigured = () => true;
 
     const response = await service.getMaps();
+    const modes = new Set(response.result.map(map => map.game_mode));
 
     assert.ok(response.result.length > 0);
-    assert.ok(response.result.every(map => map.game_mode === 'warfare'));
+    assert.ok(modes.has('warfare'));
+    assert.ok(modes.has('offensive'));
+    assert.ok(modes.has('skirmish'));
 });
 
 test('direct status updates local map history when the live map changes', async () => {

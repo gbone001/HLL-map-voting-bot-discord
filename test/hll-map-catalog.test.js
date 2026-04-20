@@ -62,6 +62,27 @@ test('catalog sync persists offensive and skirmish entries in the runtime map fi
             syncedMaps.find((map) => map.id === 'mortain_skirmish_overcast')?.game_mode,
             'skirmish'
         );
+        assert.deepEqual(
+            syncedMaps.find((map) => map.id === 'stmereeglise_offensive_us'),
+            {
+                id: 'stmereeglise_offensive_us',
+                pretty_name: 'St. Mere Eglise Offensive (US Night)',
+                game_mode: 'offensive',
+                environment: 'night',
+                map_name: 'St. Mere Eglise',
+                mode: 'offensive',
+                variant: 'Allies (Night)',
+                vote_label: 'St. Mere Eglise | Offensive | Allies (Night)',
+                weight: null,
+                seeding: null,
+                stress: null,
+                map: {
+                    id: 'stmereeglise_offensive_us',
+                    name: 'St. Mere Eglise',
+                    pretty_name: 'St. Mere Eglise Offensive (US Night)'
+                }
+            }
+        );
         assert.equal(fs.existsSync(catalogService.runtimeCatalogPath), true);
     } finally {
         if (previousDataDir === undefined) {
@@ -110,6 +131,44 @@ test('map vote settings panel shows local catalog status and manual sync button'
     const thirdRowLabels = panel.components[2].components.map((component) => component.data.label);
 
     assert.ok(fieldNames.includes('🗂️ Local Map Catalog'));
-    assert.deepEqual(thirdRowLabels, ['Sync Maps From CRCON', 'Back to Main']);
+    assert.deepEqual(thirdRowLabels, ['Sync Maps From CRCON', 'Load Pool Rotation', 'Back to Main']);
     assert.match(panel.embeds[0].data.description, /master map list/i);
   });
+
+test('bundled catalog exposes structured voting metadata for weighted entries', () => {
+    const previousDataDir = process.env.DATA_DIR;
+    const tempDataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hll-map-catalog-bundled-'));
+    process.env.DATA_DIR = tempDataDir;
+
+    try {
+        requireFresh('../src/utils/dataPath');
+        const { hllMapCatalog } = requireFresh('../src/services/hllMapCatalog');
+
+        const bundledMap = hllMapCatalog.getMaps().find((map) => map.id === 'stmariedumont_warfare');
+
+        assert.deepEqual(bundledMap, {
+            id: 'stmariedumont_warfare',
+            pretty_name: 'St. Marie Du Mont Warfare',
+            game_mode: 'warfare',
+            environment: 'day',
+            map_name: 'St. Marie Du Mont',
+            mode: 'warfare',
+            variant: 'Day',
+            vote_label: 'St. Marie Du Mont | Warfare | Day',
+            weight: 90,
+            seeding: true,
+            stress: null,
+            map: {
+                id: 'stmariedumont_warfare',
+                name: 'St. Marie Du Mont',
+                pretty_name: 'St. Marie Du Mont Warfare'
+            }
+        });
+    } finally {
+        if (previousDataDir === undefined) {
+            delete process.env.DATA_DIR;
+        } else {
+            process.env.DATA_DIR = previousDataDir;
+        }
+    }
+});

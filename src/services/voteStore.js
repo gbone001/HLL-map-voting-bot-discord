@@ -43,7 +43,9 @@ class VoteStore {
             if (!fs.existsSync(dataDir)) {
                 fs.mkdirSync(dataDir, { recursive: true });
             }
-            fs.writeFileSync(STORE_PATH, JSON.stringify(this.votes, null, 2));
+            const tempStorePath = `${STORE_PATH}.${process.pid}.tmp`;
+            fs.writeFileSync(tempStorePath, JSON.stringify(this.votes, null, 2));
+            fs.renameSync(tempStorePath, STORE_PATH);
             return true;
         } catch (error) {
             logger.error('[VoteStore] Error saving votes:', error.message);

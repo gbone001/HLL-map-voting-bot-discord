@@ -73,7 +73,7 @@ For additional servers, add `_2`, `_3`, `_4` suffixes (e.g., `MAP_VOTE_CHANNEL_I
 
 Direct RCON currently covers:
 - server status polling
-- warfare-only local map catalog fallback
+- bundled local map catalog fallback for warfare, offensive, and skirmish layers
 - current/queued map operations
 - broadcasts
 - team switch cooldown, idle kick, and high-ping threshold writes

@@ -293,15 +293,21 @@ class MapVotingService {
             return false;
         }
 
+        if (typeof this.crcon?.readQueuedNextMapState !== 'function') {
+            logger.warn(
+                `[MapVoting S${this.serverNum}] Clearing pending queued winner ${pendingQueuedMap.mapId} because the transport cannot verify queued-map state`
+            );
+            this.clearPendingQueuedMap();
+            return false;
+        }
+
         let queuedState = null;
-        if (typeof this.crcon?.readQueuedNextMapState === 'function') {
-            try {
-                queuedState = await this.crcon.readQueuedNextMapState();
-            } catch (error) {
-                logger.warn(
-                    `[MapVoting S${this.serverNum}] Could not verify pending queued winner ${pendingQueuedMap.mapId}: ${error.message}`
-                );
-            }
+        try {
+            queuedState = await this.crcon.readQueuedNextMapState();
+        } catch (error) {
+            logger.warn(
+                `[MapVoting S${this.serverNum}] Could not verify pending queued winner ${pendingQueuedMap.mapId}: ${error.message}`
+            );
         }
 
         if (queuedState?.nextMapId === pendingQueuedMap.mapId) {
@@ -434,8 +440,13 @@ class MapVotingService {
             const allMaps = await this.getAllMaps();
             if (!allMaps) return [];
 
+            const mapByVoteLabel = new Map(
+                allMaps.map((map) => [this.getVoteLabel(map), map])
+            );
+
             for (const answer of poll.answers.values()) {
-                const matchingMap = allMaps.find(m => m.pretty_name === answer.text);
+                const matchingMap = mapByVoteLabel.get(answer.text) ||
+                    allMaps.find((map) => map.pretty_name === answer.text);
                 if (matchingMap) {
                     maps.push(this.formatMapForVote(matchingMap));
                 }
@@ -770,13 +781,13 @@ class MapVotingService {
         return this.syncManagedRotationPool(schedule, allMaps);
     }
 
-    async applyManagedRotationSelection(selectedMapId, source = 'unknown', schedule = null, allMaps = null) {
+    async applyManagedRotationSelection(selectedMapId, source = 'unknown', schedule = null, allMaps = null, options = {}) {
+        const {
+            queueStrategy = 'default'
+        } = options;
+
         if (!selectedMapId) {
             throw new Error('applyManagedRotationSelection requires a selected map id');
-        }
-
-        if (typeof this.crcon?.replaceMapRotation !== 'function') {
-            throw new Error('CRCON replaceMapRotation support is required for vote-driven rotation management');
         }
 
         const basePoolMapIds = this.managedRotationPoolMapIds.length > 0
@@ -784,7 +795,16 @@ class MapVotingService {
             : await this.getManagedRotationPoolMapIds(schedule, allMaps);
         const rotationOrder = this.buildManagedRotationOrder(basePoolMapIds, selectedMapId);
 
-        await this.crcon.replaceMapRotation(rotationOrder);
+        if (queueStrategy === 'direct-sequence-start' && typeof this.crcon?.queueNextMapAtSequenceStart === 'function') {
+            await this.crcon.queueNextMapAtSequenceStart(selectedMapId);
+        } else if (typeof this.crcon?.queueNextMap === 'function') {
+            await this.crcon.queueNextMap(selectedMapId);
+        } else if (typeof this.crcon?.replaceMapRotation === 'function') {
+            await this.crcon.replaceMapRotation(rotationOrder);
+        } else {
+            throw new Error('A queueNextMap or replaceMapRotation transport capability is required for vote-driven rotation management');
+        }
+
         this.managedRotationPoolMapIds = rotationOrder;
         this.setPendingQueuedMap(selectedMapId, source);
         return rotationOrder;
@@ -887,6 +907,25 @@ class MapVotingService {
                 logger.warn(
                     `[MapVoting S${this.serverNum}] Falling back to snapshot-based game state detection because recent log lookup failed: ${logError.message}`
                 );
+            }
+
+            if (typeof this.crcon?.getMatchSnapshot === 'function') {
+                try {
+                    const snapshot = await this.crcon.getMatchSnapshot();
+                    if (typeof snapshot?.gameActive === 'boolean') {
+                        this.gameActive = snapshot.gameActive;
+                        return this.gameActive;
+                    }
+
+                    if (snapshot?.currentMapId) {
+                        this.gameActive = true;
+                        return this.gameActive;
+                    }
+                } catch (snapshotError) {
+                    logger.warn(
+                        `[MapVoting S${this.serverNum}] Snapshot-based game state detection failed: ${snapshotError.message}`
+                    );
+                }
             }
 
             if (this.gameActive === null) {
@@ -1283,13 +1322,23 @@ class MapVotingService {
     }
 
     formatMapForVote(map) {
+        const voteLabel = this.getVoteLabel(map);
         return {
             id: map.id,
-            name: map.map?.name || map.id,
-            mode: map.game_mode,
+            name: map.map_name || map.map?.name || map.id,
+            mode: map.mode || map.game_mode,
+            variant: map.variant || map.environment,
             time: map.environment,
-            pretty_name: map.pretty_name
+            pretty_name: map.pretty_name,
+            vote_label: voteLabel,
+            weight: map.weight ?? null,
+            seeding: map.seeding ?? null,
+            stress: map.stress ?? null
         };
+    }
+
+    getVoteLabel(map) {
+        return map?.vote_label || map?.pretty_name || map?.id;
     }
 
     // ==================== VOTE RESULTS ====================
@@ -1327,15 +1376,21 @@ class MapVotingService {
 
     async getVoteResult(mapResults, candidateMaps = this.maps, currentMapId = null) {
         try {
-            const candidateMapByPrettyName = new Map(
-                (candidateMaps || []).map((map) => [map.pretty_name, map])
+            const candidateMapByVoteLabel = new Map(
+                (candidateMaps || []).flatMap((map) => {
+                    const entries = [[this.getVoteLabel(map), map]];
+                    if (map.pretty_name && map.pretty_name !== this.getVoteLabel(map)) {
+                        entries.push([map.pretty_name, map]);
+                    }
+                    return entries;
+                })
             );
 
             let candidates = [];
             let bestEligibleVoteCount = null;
 
             for (const [answerText, voteCount] of mapResults) {
-                const matchingMap = candidateMapByPrettyName.get(answerText);
+                const matchingMap = candidateMapByVoteLabel.get(answerText);
                 if (!matchingMap) {
                     continue;
                 }
@@ -1441,7 +1496,8 @@ class MapVotingService {
                     mapId,
                     queueStrategy === 'direct-sequence-start' ? 'vote-result-session-zero' : 'vote-result',
                     this.getActiveScheduleSettings(),
-                    allMaps
+                    allMaps,
+                    { queueStrategy }
                 );
             } else {
                 logger.warn(`[MapVoting S${this.serverNum}] Could not determine next map`);
@@ -1488,7 +1544,7 @@ class MapVotingService {
 
             const pollData = {
                 question: { text: 'Vote for the next map:' },
-                answers: this.maps.map(map => ({ text: map.pretty_name })),
+                answers: this.maps.map((map) => ({ text: this.getVoteLabel(map) })),
                 duration: 2,
                 allowMultiselect: false
             };

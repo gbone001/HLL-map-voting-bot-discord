@@ -1038,3 +1038,61 @@ test('loading the active schedule map pool replaces the managed server rotation'
     assert.deepEqual(appliedRotationMapIds, ['utahbeach_warfare', 'omahabeach_warfare']);
     assert.deepEqual(service.managedRotationPoolMapIds, ['utahbeach_warfare', 'omahabeach_warfare']);
 });
+
+test('formatMapForVote emits a structured vote label from map, mode, and variant', () => {
+    const service = new MapVotingService(1);
+
+    const formattedMap = service.formatMapForVote({
+        id: 'carentan_warfare',
+        pretty_name: 'Carentan Warfare',
+        game_mode: 'warfare',
+        environment: 'day',
+        map_name: 'Carentan',
+        mode: 'warfare',
+        variant: 'Day',
+        vote_label: 'Carentan | Warfare | Day',
+        weight: 90,
+        seeding: true,
+        stress: null,
+        map: { name: 'Carentan' }
+    });
+
+    assert.deepEqual(formattedMap, {
+        id: 'carentan_warfare',
+        name: 'Carentan',
+        mode: 'warfare',
+        variant: 'Day',
+        time: 'day',
+        pretty_name: 'Carentan Warfare',
+        vote_label: 'Carentan | Warfare | Day',
+        weight: 90,
+        seeding: true,
+        stress: null
+    });
+});
+
+test('getVoteResult resolves winners by structured vote label', async () => {
+    const service = new MapVotingService(1);
+
+    const winner = await service.getVoteResult(
+        [
+            ['Carentan | Warfare | Day', 6],
+            ['Foy | Warfare | Day', 2]
+        ],
+        [
+            {
+                id: 'carentan_warfare',
+                pretty_name: 'Carentan Warfare',
+                vote_label: 'Carentan | Warfare | Day'
+            },
+            {
+                id: 'foy_warfare',
+                pretty_name: 'Foy Warfare',
+                vote_label: 'Foy | Warfare | Day'
+            }
+        ],
+        'utahbeach_warfare'
+    );
+
+    assert.equal(winner, 'carentan_warfare');
+});
