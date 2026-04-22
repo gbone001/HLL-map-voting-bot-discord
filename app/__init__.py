@@ -1,0 +1,1 @@
+"""Map vote service package."""

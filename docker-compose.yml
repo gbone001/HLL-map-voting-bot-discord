@@ -1,0 +1,11 @@
+version: "3.9"
+
+services:
+  mapvote-service:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      CRCON_URL: ${CRCON_URL:-http://localhost:8010}
+      CRCON_TOKEN: ${CRCON_TOKEN:-change-me}
+      DATABASE_URL: ${DATABASE_URL:-sqlite:///:memory:}
