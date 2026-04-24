@@ -150,6 +150,40 @@ test('active vote is finalized when seeded state is lost mid-match', async () =>
     assert.equal(service.seeded, false);
 });
 
+test('active vote is finalized when player count drops below minimumPlayers mid-match', async () => {
+    const service = new MapVotingService(1);
+    let stopVoteCalls = 0;
+    let seedingMessageCalls = 0;
+
+    service.voteMapActive = true;
+    service.seeded = true;
+    service.voteActive = true;
+    service.gameActive = true;
+    service.minimumPlayers = 25;
+    service.deactivatePlayers = 10;
+    service.applyScheduleSettings = async () => {};
+    service.getGameState = async () => true;
+    service.crcon = {
+        getStatus: async () => ({ result: { current_players: 24 } })
+    };
+    service.stopVote = async () => {
+        stopVoteCalls += 1;
+        service.voteActive = false;
+    };
+    service.clearAllMessages = async () => {};
+    service.sendSeedingMsg = async () => {
+        seedingMessageCalls += 1;
+    };
+    service.applyNonSeededRotation = async () => false;
+
+    await service.doMapVote();
+
+    assert.equal(stopVoteCalls, 1);
+    assert.equal(seedingMessageCalls, 1);
+    assert.equal(service.voteActive, false);
+    assert.equal(service.seeded, false);
+});
+
 test('failed match-end finalization is retried on the next tick before any new vote starts', async () => {
     const service = new MapVotingService(1);
     let stopVoteCalls = 0;
@@ -1002,10 +1036,10 @@ test('vote finalization random fallback excludes the live current map when no vo
     }
 });
 
-test('non-seeded rotation falls back to available maps when no non-seeded list is configured', async () => {
+test('non-seeded rotation fails closed when no non-seeded list is configured', async () => {
     const originalConfig = JSON.parse(JSON.stringify(configManager.config));
     const service = new MapVotingService(1);
-    let selectedRotationMap = null;
+    let replaceRotationCalls = 0;
 
     configManager.config.servers = {
         ...configManager.config.servers,
@@ -1024,16 +1058,16 @@ test('non-seeded rotation falls back to available maps when no non-seeded list i
     service.getRecentExcludedMapIds = async () => new Set(['omahabeach_warfare']);
     service.getCurrentMapId = async () => 'omahabeach_warfare';
     service.crcon = {
-        replaceMapRotation: async (mapIds) => {
-            selectedRotationMap = mapIds[0];
+        replaceMapRotation: async () => {
+            replaceRotationCalls += 1;
         }
     };
 
     try {
         const applied = await service.applyNonSeededRotation();
 
-        assert.equal(applied, true);
-        assert.equal(selectedRotationMap, 'utahbeach_warfare');
+        assert.equal(applied, false);
+        assert.equal(replaceRotationCalls, 0);
     } finally {
         configManager.config = originalConfig;
     }

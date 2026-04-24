@@ -1385,23 +1385,12 @@ class MapVotingService {
                 return false;
             }
 
-            let desiredMapIds = new Set(nonSeededMapList);
+            const desiredMapIds = new Set(nonSeededMapList);
             if (!desiredMapIds.size) {
-                const whitelist = await this.getEffectiveWhitelist();
-                const fallbackMaps = allMaps.filter(map => {
-                    if (this.blacklist.includes(map.id)) {
-                        return false;
-                    }
-                    if (whitelist && whitelist.size > 0 && !whitelist.has(map.id)) {
-                        return false;
-                    }
-                    return true;
-                });
-
-                desiredMapIds = new Set(fallbackMaps.map(map => map.id));
                 logger.warn(
-                    `[MapVoting S${this.serverNum}] Non-seeded map list is empty; falling back to ${desiredMapIds.size} available map(s)`
+                    `[MapVoting S${this.serverNum}] Non-seeded rotation skipped because no non-seeded map list is configured`
                 );
+                return false;
             }
 
             const configuredMaps = allMaps.filter(map => desiredMapIds.has(map.id) && !this.blacklist.includes(map.id));
@@ -1952,9 +1941,11 @@ class MapVotingService {
             if (currentPlayers >= this.minimumPlayers && !this.seeded) {
                 logger.info(`[MapVoting S${this.serverNum}] Server reached ${this.minimumPlayers} players!`);
                 this.seeded = true;
-            } else if (currentPlayers <= this.deactivatePlayers) {
+            } else if (currentPlayers < this.minimumPlayers) {
                 if (this.seeded) {
-                    logger.info(`[MapVoting S${this.serverNum}] Server dropped below ${this.deactivatePlayers} players`);
+                    logger.info(
+                        `[MapVoting S${this.serverNum}] Server dropped below ${this.minimumPlayers} players; switching to non-seeded rules`
+                    );
                 }
                 this.seeded = false;
             }
