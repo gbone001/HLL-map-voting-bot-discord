@@ -1169,6 +1169,42 @@ test('loading the active schedule map pool replaces the managed server rotation'
     assert.deepEqual(service.managedRotationPoolMapIds, ['utahbeach_warfare', 'omahabeach_warfare']);
 });
 
+test('managed rotation queueing preserves the full map pool with the selected map first', async () => {
+    const service = new MapVotingService(1);
+    let queuedMapId = null;
+    let queuedRotationMapIds = null;
+
+    service.crcon = {
+        queueNextMap: async (mapId, rotationMapIds) => {
+            queuedMapId = mapId;
+            queuedRotationMapIds = rotationMapIds;
+        }
+    };
+    service.getActiveScheduleSettings = () => ({
+        whitelist: ['foy_warfare', 'utahbeach_warfare', 'omahabeach_warfare']
+    });
+    service.getAllMaps = async () => ([
+        { id: 'foy_warfare', pretty_name: 'Foy Warfare', game_mode: 'warfare', environment: 'day' },
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day' },
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day' }
+    ]);
+
+    const rotationOrder = await service.applyManagedRotationSelection(
+        'utahbeach_warfare',
+        'test-selection',
+        service.getActiveScheduleSettings(),
+        await service.getAllMaps()
+    );
+
+    assert.equal(queuedMapId, 'utahbeach_warfare');
+    assert.deepEqual(queuedRotationMapIds, [
+        'utahbeach_warfare',
+        'foy_warfare',
+        'omahabeach_warfare'
+    ]);
+    assert.deepEqual(rotationOrder, queuedRotationMapIds);
+});
+
 test('formatMapForVote emits a structured vote label from map, mode, and variant', () => {
     const service = new MapVotingService(1);
 

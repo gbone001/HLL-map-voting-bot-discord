@@ -533,6 +533,53 @@ test('queueNextMap tolerates a stale public-info read before the queued map sett
     ]);
 });
 
+test('queueNextMap can send a full managed rotation while verifying the selected next map', async () => {
+    const crcon = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_ONLY,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token'
+    });
+
+    const requests = [];
+    crcon.client = {
+        post: async (url, payload) => {
+            requests.push({ method: 'post', url, payload });
+            return { data: { result: { ok: true } } };
+        },
+        get: async (url) => {
+            requests.push({ method: 'get', url });
+            return {
+                data: {
+                    result: {
+                        currentMapName: 'Foy Warfare',
+                        nextMapName: 'Utah Beach Warfare'
+                    }
+                }
+            };
+        }
+    };
+
+    const result = await crcon.queueNextMap('utahbeach_warfare', [
+        'utahbeach_warfare',
+        'foy_warfare',
+        'omahabeach_warfare'
+    ]);
+
+    assert.equal(result.queuedState.nextMapId, 'utahbeach_warfare');
+    assert.deepEqual(requests[0], {
+        method: 'post',
+        url: '/api/set_map_rotation',
+        payload: {
+            map_names: [
+                'utahbeach_warfare',
+                'foy_warfare',
+                'omahabeach_warfare'
+            ]
+        }
+    });
+});
+
 test('queueNextMap throws in direct RCON mode when the next sequence slot does not become the requested map', async () => {
     const crcon = new CRCONService({
         serverName: 'Test Server',

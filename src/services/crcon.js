@@ -1118,8 +1118,16 @@ class CRCONService {
         };
     }
 
-    async queueNextMap(mapId) {
-        const response = await this.post('set_map_rotation', { map_names: [mapId] });
+    async queueNextMap(mapId, rotationMapIds = null) {
+        const mapNames = Array.isArray(rotationMapIds) && rotationMapIds.length > 0
+            ? hllMapCatalog.normalizeMapIds(rotationMapIds, { dropUnknown: false })
+            : [mapId];
+
+        if (!mapNames.includes(mapId)) {
+            mapNames.unshift(mapId);
+        }
+
+        const response = await this.post('set_map_rotation', { map_names: mapNames });
         this.assertCommandSucceeded(response, 'set_map_rotation');
 
         const { queuedState, verification } = await this.verifyQueuedNextMap(mapId);

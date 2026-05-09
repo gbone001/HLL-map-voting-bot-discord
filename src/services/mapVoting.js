@@ -800,7 +800,7 @@ class MapVotingService {
         if (queueStrategy === 'direct-sequence-start' && typeof this.crcon?.queueNextMapAtSequenceStart === 'function') {
             await this.crcon.queueNextMapAtSequenceStart(selectedMapId);
         } else if (typeof this.crcon?.queueNextMap === 'function') {
-            await this.crcon.queueNextMap(selectedMapId);
+            await this.crcon.queueNextMap(selectedMapId, rotationOrder);
         } else if (typeof this.crcon?.replaceMapRotation === 'function') {
             await this.crcon.replaceMapRotation(rotationOrder);
         } else {
