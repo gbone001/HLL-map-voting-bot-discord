@@ -698,7 +698,7 @@ test('stopVote still finalizes the next map when the Discord poll has already ex
 
 test('vote finalization skips the live current map and picks the next highest eligible winner', async () => {
     const service = new MapVotingService(1);
-    let selectedRotationMap = null;
+    let appliedRotationMapIds = null;
 
     service.voteMessageId = 'poll-message-current-map';
     service.maps = [
@@ -721,7 +721,7 @@ test('vote finalization skips the live current map and picks the next highest el
     };
     service.crcon = {
         replaceMapRotation: async (mapIds) => {
-            selectedRotationMap = mapIds[0];
+            appliedRotationMapIds = mapIds;
         }
     };
     service.getAllMaps = async () => ([
@@ -740,12 +740,12 @@ test('vote finalization skips the live current map and picks the next highest el
     const mapId = await service.setVoteResult();
 
     assert.equal(mapId, 'carentan_warfare');
-    assert.equal(selectedRotationMap, 'carentan_warfare');
+    assert.deepEqual(appliedRotationMapIds.slice(0, 2), ['stmariedumont_warfare', 'carentan_warfare']);
 });
 
 test('vote finalization prefers the live current map over stale status when excluding the live map', async () => {
     const service = new MapVotingService(1);
-    let selectedRotationMap = null;
+    let appliedRotationMapIds = null;
 
     service.voteMessageId = 'poll-message-stale-status';
     service.maps = [
@@ -781,7 +781,7 @@ test('vote finalization prefers the live current map over stale status when excl
             }
         }),
         replaceMapRotation: async (mapIds) => {
-            selectedRotationMap = mapIds[0];
+            appliedRotationMapIds = mapIds;
         }
     };
     service.getAllMaps = async () => ([
@@ -798,13 +798,13 @@ test('vote finalization prefers the live current map over stale status when excl
     const mapId = await service.setVoteResult();
 
     assert.equal(mapId, 'utahbeach_warfare');
-    assert.equal(selectedRotationMap, 'utahbeach_warfare');
+    assert.deepEqual(appliedRotationMapIds.slice(0, 2), ['omahabeach_warfare', 'utahbeach_warfare']);
 });
 
 test('vote finalization random fallback uses live poll options instead of stale in-memory maps', async () => {
     const originalRandom = Math.random;
     const service = new MapVotingService(1);
-    let selectedRotationMap = null;
+    let appliedRotationMapIds = null;
 
     service.voteMessageId = 'poll-message-1';
     service.maps = [
@@ -826,7 +826,7 @@ test('vote finalization random fallback uses live poll options instead of stale 
     };
     service.crcon = {
         replaceMapRotation: async (mapIds) => {
-            selectedRotationMap = mapIds[0];
+            appliedRotationMapIds = mapIds;
         }
     };
     service.getAllMaps = async () => ([
@@ -852,7 +852,7 @@ test('vote finalization random fallback uses live poll options instead of stale 
         const mapId = await service.setVoteResult();
 
         assert.equal(mapId, 'utahbeach_warfare');
-        assert.equal(selectedRotationMap, 'utahbeach_warfare');
+        assert.equal(appliedRotationMapIds[0], 'utahbeach_warfare');
     } finally {
         Math.random = originalRandom;
     }
@@ -992,7 +992,7 @@ test('vote finalization fails closed when current map exclusions are not reliabl
 test('vote finalization random fallback excludes the live current map when no votes were cast', async () => {
     const originalRandom = Math.random;
     const service = new MapVotingService(1);
-    let selectedRotationMap = null;
+    let appliedRotationMapIds = null;
 
     service.voteMessageId = 'poll-message-random-current-map';
     service.maps = [
@@ -1013,7 +1013,7 @@ test('vote finalization random fallback excludes the live current map when no vo
     };
     service.crcon = {
         replaceMapRotation: async (mapIds) => {
-            selectedRotationMap = mapIds[0];
+            appliedRotationMapIds = mapIds;
         }
     };
     service.getAllMaps = async () => ([
@@ -1030,7 +1030,7 @@ test('vote finalization random fallback excludes the live current map when no vo
         const mapId = await service.setVoteResult();
 
         assert.equal(mapId, 'carentan_warfare');
-        assert.equal(selectedRotationMap, 'carentan_warfare');
+        assert.deepEqual(appliedRotationMapIds.slice(0, 2), ['stmariedumont_warfare', 'carentan_warfare']);
     } finally {
         Math.random = originalRandom;
     }
@@ -1076,7 +1076,7 @@ test('non-seeded rotation fails closed when no non-seeded list is configured', a
 test('non-seeded rotation avoids re-selecting the current map when alternatives exist', async () => {
     const originalConfig = JSON.parse(JSON.stringify(configManager.config));
     const service = new MapVotingService(1);
-    let selectedRotationMap = null;
+    let appliedRotationMapIds = null;
 
     configManager.config.servers = {
         ...configManager.config.servers,
@@ -1095,7 +1095,7 @@ test('non-seeded rotation avoids re-selecting the current map when alternatives 
     service.getCurrentMapId = async () => 'omahabeach_warfare';
     service.crcon = {
         replaceMapRotation: async (mapIds) => {
-            selectedRotationMap = mapIds[0];
+            appliedRotationMapIds = mapIds;
         }
     };
 
@@ -1103,7 +1103,7 @@ test('non-seeded rotation avoids re-selecting the current map when alternatives 
         const applied = await service.applyNonSeededRotation();
 
         assert.equal(applied, true);
-        assert.equal(selectedRotationMap, 'utahbeach_warfare');
+        assert.deepEqual(appliedRotationMapIds.slice(0, 2), ['omahabeach_warfare', 'utahbeach_warfare']);
     } finally {
         configManager.config = originalConfig;
     }
@@ -1169,7 +1169,7 @@ test('loading the active schedule map pool replaces the managed server rotation'
     assert.deepEqual(service.managedRotationPoolMapIds, ['utahbeach_warfare', 'omahabeach_warfare']);
 });
 
-test('managed rotation queueing preserves the full map pool with the selected map first', async () => {
+test('managed rotation queueing preserves the full map pool with the selected map after current map', async () => {
     const service = new MapVotingService(1);
     let queuedMapId = null;
     let queuedRotationMapIds = null;
@@ -1193,13 +1193,14 @@ test('managed rotation queueing preserves the full map pool with the selected ma
         'utahbeach_warfare',
         'test-selection',
         service.getActiveScheduleSettings(),
-        await service.getAllMaps()
+        await service.getAllMaps(),
+        { currentMapId: 'foy_warfare' }
     );
 
     assert.equal(queuedMapId, 'utahbeach_warfare');
     assert.deepEqual(queuedRotationMapIds, [
-        'utahbeach_warfare',
         'foy_warfare',
+        'utahbeach_warfare',
         'omahabeach_warfare'
     ]);
     assert.deepEqual(rotationOrder, queuedRotationMapIds);

@@ -749,10 +749,21 @@ class MapVotingService {
         return [...new Set(poolMapIds.filter((mapId) => !this.blacklist.includes(mapId)))];
     }
 
-    buildManagedRotationOrder(poolMapIds, selectedMapId = null) {
+    buildManagedRotationOrder(poolMapIds, selectedMapId = null, currentMapId = null) {
         const uniquePoolMapIds = [...new Set((poolMapIds || []).filter(Boolean))];
         if (!selectedMapId) {
             return uniquePoolMapIds;
+        }
+
+        if (
+            currentMapId &&
+            currentMapId !== selectedMapId &&
+            uniquePoolMapIds.includes(currentMapId)
+        ) {
+            const remainingMapIds = uniquePoolMapIds.filter((mapId) => (
+                mapId !== currentMapId && mapId !== selectedMapId
+            ));
+            return [currentMapId, selectedMapId, ...remainingMapIds];
         }
 
         const remainingMapIds = uniquePoolMapIds.filter((mapId) => mapId !== selectedMapId);
@@ -795,7 +806,7 @@ class MapVotingService {
         const basePoolMapIds = this.managedRotationPoolMapIds.length > 0
             ? this.managedRotationPoolMapIds
             : await this.getManagedRotationPoolMapIds(schedule, allMaps);
-        const rotationOrder = this.buildManagedRotationOrder(basePoolMapIds, selectedMapId);
+        const rotationOrder = this.buildManagedRotationOrder(basePoolMapIds, selectedMapId, options.currentMapId || null);
 
         if (queueStrategy === 'direct-sequence-start' && typeof this.crcon?.queueNextMapAtSequenceStart === 'function') {
             await this.crcon.queueNextMapAtSequenceStart(selectedMapId);
@@ -1454,7 +1465,8 @@ class MapVotingService {
                 selectedMap.id,
                 'non-seeded-rotation',
                 this.getActiveScheduleSettings(),
-                allMaps
+                allMaps,
+                { currentMapId }
             );
             logger.info(`[MapVoting S${this.serverNum}] Applied non-seeded rotation map: ${selectedMap.id}`);
             return true;
@@ -1716,7 +1728,7 @@ class MapVotingService {
                     queueStrategy === 'direct-sequence-start' ? 'vote-result-session-zero' : 'vote-result',
                     this.getActiveScheduleSettings(),
                     allMaps,
-                    { queueStrategy }
+                    { queueStrategy, currentMapId }
                 );
             } else {
                 logger.warn(`[MapVoting S${this.serverNum}] Could not determine next map`);
