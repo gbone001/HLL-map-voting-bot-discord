@@ -765,6 +765,17 @@ class CRCONService {
         return normalizeLooseMapIdentity(leftValue) === normalizeLooseMapIdentity(rightValue);
     }
 
+    areMapReferencesLooselyEquivalent(leftValue, rightValue) {
+        if (!leftValue || !rightValue) {
+            return false;
+        }
+
+        const leftCanonical = this.resolveCanonicalMapId(leftValue) || leftValue;
+        const rightCanonical = this.resolveCanonicalMapId(rightValue) || rightValue;
+
+        return normalizeLooseMapIdentity(leftCanonical) === normalizeLooseMapIdentity(rightCanonical);
+    }
+
     findMapById(mapId) {
         if (!mapId) {
             return null;
@@ -1211,10 +1222,18 @@ class CRCONService {
         const response = await this.moveDirectMapToSequenceIndex(mapId, 0, 'set_map_rotation');
         const sequenceState = await this.readDirectSequenceState();
         const queuedEntry = sequenceState.entries.find((entry) => entry.sequencePosition === 0) || null;
+        const strictMatch = queuedEntry?.id && this.areMapReferencesEquivalent(queuedEntry.id, mapId);
+        const looseMatch = queuedEntry?.id && !strictMatch && this.areMapReferencesLooselyEquivalent(queuedEntry.id, mapId);
 
-        if (!queuedEntry?.id || !this.areMapReferencesEquivalent(queuedEntry.id, mapId)) {
+        if (!queuedEntry?.id || (!strictMatch && !looseMatch)) {
             throw new Error(
                 `Queued next map mismatch at sequence position 0: expected ${mapId} but observed ${queuedEntry?.id || 'none'}`
+            );
+        }
+
+        if (looseMatch) {
+            logger.warn(
+                `[CRCON ${this.serverName}] Sequence-start queued map variant differed from requested map; expected=${mapId} observed=${queuedEntry.id} (accepted via loose identity match)`
             );
         }
 

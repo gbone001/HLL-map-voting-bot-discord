@@ -762,3 +762,50 @@ test('queueNextMapAtSequenceStart moves the voted map to sequence position 0 for
         }
     ]);
 });
+
+test('queueNextMapAtSequenceStart accepts loose-equivalent map variants at sequence position 0', async () => {
+    const crcon = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_WITH_FALLBACK,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token',
+        rconHost: '127.0.0.1',
+        rconPort: 27015,
+        rconPassword: 'secret'
+    });
+
+    const sequenceState = {
+        currentIndex: 10,
+        MapSequence: [
+            { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 0 },
+            { MapName: 'Foy', MapId: 'foy_warfare', position: 9 },
+            { MapName: 'Omaha Beach', MapId: 'omahabeach_warfare', position: 10 }
+        ]
+    };
+
+    crcon.executeDirectCommand = async (command, payload) => {
+        if (command === 'GetServerInformation') {
+            return { result: sequenceState };
+        }
+
+        if (command === 'MoveMapInSequence') {
+            sequenceState.MapSequence = sequenceState.MapSequence
+                .map((entry) => {
+                    if (entry.position === payload.CurrentIndex) {
+                        return { ...entry, position: payload.NewIndex };
+                    }
+                    if (entry.position >= payload.NewIndex && entry.position < payload.CurrentIndex) {
+                        return { ...entry, position: entry.position + 1 };
+                    }
+                    return entry;
+                });
+            return { result: { ok: true } };
+        }
+
+        return { result: { ok: true } };
+    };
+
+    const result = await crcon.queueNextMapAtSequenceStart('utahbeach_warfare_night');
+
+    assert.equal(result.queuedState.nextMapId, 'utahbeach_warfare');
+});
