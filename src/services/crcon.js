@@ -1033,6 +1033,21 @@ class CRCONService {
             };
         }
 
+        return this.readDirectQueuedNextMapState({ authoritative: false });
+    }
+
+    async readDirectQueuedNextMapState(options = {}) {
+        const { authoritative = true } = options;
+
+        if (!this.hasDirectRconConfigured()) {
+            return {
+                currentMapId: this.currentMatchMapId,
+                nextMapId: null,
+                source: 'unavailable',
+                authoritative: false
+            };
+        }
+
         const sequenceResponse = await this.executeDirectCommand(
             'GetServerInformation',
             { Name: 'mapsequence', Value: '' },
@@ -1049,7 +1064,7 @@ class CRCONService {
             currentMapId: currentEntry?.id || this.currentMatchMapId,
             nextMapId: nextEntry?.id || null,
             source: 'direct-sequence',
-            authoritative: false
+            authoritative: Boolean(authoritative)
         };
     }
 
@@ -1095,6 +1110,33 @@ class CRCONService {
                     queuedState,
                     verification: lastVerification
                 };
+            }
+
+            if (queuedState?.source === 'public-info' && this.hasDirectRconConfigured()) {
+                try {
+                    const directQueuedState = await this.readDirectQueuedNextMapState();
+                    const directObservedMapId = directQueuedState?.nextMapId || null;
+                    const directMatchesExpectedMap = directObservedMapId
+                        && this.areMapReferencesEquivalent(directObservedMapId, mapId);
+
+                    if (directMatchesExpectedMap) {
+                        return {
+                            queuedState: directQueuedState,
+                            verification: {
+                                expectedMapId: mapId,
+                                observedMapId: directObservedMapId,
+                                source: directQueuedState?.source || 'direct-sequence',
+                                authoritative: Boolean(directQueuedState?.authoritative),
+                                verified: true,
+                                attempts: attempt
+                            }
+                        };
+                    }
+                } catch (error) {
+                    logger.warn(
+                        `[CRCON ${this.serverName}] Direct queued-map verification fallback failed: ${error.message}`
+                    );
+                }
             }
 
             if (!observedMapId && !queuedState?.authoritative && queuedState?.source === 'direct-sequence') {

@@ -98,6 +98,8 @@ class MapVotingService {
         this.lastServerStatus = null;
         this.lastVoteStartedForCurrentMapId = null;
         this.voteFinalizationInProgress = false;
+        this.voteFinalizationFailureCount = 0;
+        this.maxVoteFinalizationRetries = 3;
         this.skipNextUnseededMatchEndRotation = false;
         this.pendingQueuedMapMaxHoldMs = 3 * 60 * 60 * 1000;
         this.lastObservedSessionRemainingMatchTime = null;
@@ -1792,11 +1794,23 @@ class MapVotingService {
                 this.lastVoteStartedForCurrentMapId = confirmedCurrentMapId;
             }
 
+            this.voteFinalizationFailureCount = 0;
+
             logger.info(`[MapVoting S${this.serverNum}] Vote started with ${this.maps.length} maps (gameStart: ${this.gameStart})`);
         } catch (error) {
             logger.error(`[MapVoting S${this.serverNum}] Error starting vote:`, error.message);
             this.voteActive = false;
         }
+    }
+
+    shouldRetryVoteFinalization(error) {
+        const message = error?.message || '';
+
+        if (/Queued next map mismatch/i.test(message)) {
+            return false;
+        }
+
+        return true;
     }
 
     async stopVote(options = {}) {
@@ -1866,6 +1880,7 @@ class MapVotingService {
                 voteStore.deleteVote(gameStart, this.serverNum);
             }
 
+            this.voteFinalizationFailureCount = 0;
             this.voteActive = false;
             logger.info(`[MapVoting S${this.serverNum}] Vote stopped`);
             return finalizedMapId;
@@ -1874,12 +1889,33 @@ class MapVotingService {
             if (finalizationClaimed && gameStart) {
                 voteStore.releaseVoteFinalization(gameStart, this.serverNum, finalizationOwnerId);
             }
-            if (keepVoteActiveOnFailure) {
+            const canRetryFinalization = keepVoteActiveOnFailure && this.shouldRetryVoteFinalization(error);
+
+            if (canRetryFinalization) {
+                this.voteFinalizationFailureCount += 1;
+            }
+
+            if (canRetryFinalization && this.voteFinalizationFailureCount <= this.maxVoteFinalizationRetries) {
                 logger.warn(
-                    `[MapVoting S${this.serverNum}] Preserving active vote state so finalization can retry on the next polling tick`
+                    `[MapVoting S${this.serverNum}] Preserving active vote state so finalization can retry on the next polling tick (attempt ${this.voteFinalizationFailureCount}/${this.maxVoteFinalizationRetries})`
                 );
             } else {
                 this.voteActive = false;
+                if (gameStart) {
+                    voteStore.deleteVote(gameStart, this.serverNum);
+                }
+
+                if (keepVoteActiveOnFailure && !canRetryFinalization) {
+                    logger.warn(
+                        `[MapVoting S${this.serverNum}] Finalization failure is non-retryable; clearing active vote state to prevent infinite retry loops`
+                    );
+                } else if (canRetryFinalization) {
+                    logger.error(
+                        `[MapVoting S${this.serverNum}] Finalization retry limit exceeded (${this.maxVoteFinalizationRetries}); clearing active vote state`
+                    );
+                }
+
+                this.voteFinalizationFailureCount = 0;
             }
             return null;
         } finally {

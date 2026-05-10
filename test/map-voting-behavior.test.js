@@ -696,6 +696,41 @@ test('stopVote still finalizes the next map when the Discord poll has already ex
     }
 });
 
+test('stopVote clears active vote state on non-retryable queued-map mismatch failures', async () => {
+    const gameStart = Date.now() + Math.floor(Math.random() * 100000);
+    const serverNum = 1;
+    const messageId = `vote-${gameStart}`;
+
+    voteStore.deleteVote(gameStart, serverNum);
+    voteStore.setVote(messageId, gameStart, serverNum, [
+        { id: 'stmariedumont_warfare', pretty_name: 'St. Marie Du Mont Warfare' }
+    ]);
+
+    const service = new MapVotingService(serverNum);
+    service.gameStart = gameStart;
+    service.voteMessageId = messageId;
+    service.voteActive = true;
+    service.voteMessage = {
+        poll: {
+            end: async () => {}
+        }
+    };
+    service.setVoteResult = async () => {
+        throw new Error('Queued next map mismatch: expected stmariedumont_warfare but observed foy_warfare via public-info');
+    };
+
+    try {
+        const finalizedMapId = await service.stopVote({ keepVoteActiveOnFailure: true });
+
+        assert.equal(finalizedMapId, null);
+        assert.equal(service.voteActive, false);
+        assert.equal(voteStore.getVote(gameStart, serverNum), null);
+        assert.equal(service.voteFinalizationFailureCount, 0);
+    } finally {
+        voteStore.deleteVote(gameStart, serverNum);
+    }
+});
+
 test('vote finalization skips the live current map and picks the next highest eligible winner', async () => {
     const service = new MapVotingService(1);
     let appliedRotationMapIds = null;

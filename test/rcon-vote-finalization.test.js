@@ -533,6 +533,57 @@ test('queueNextMap tolerates a stale public-info read before the queued map sett
     ]);
 });
 
+test('queueNextMap accepts direct sequence verification when public-info remains stale', async () => {
+    const crcon = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_WITH_FALLBACK,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token',
+        rconHost: '127.0.0.1',
+        rconPort: 27015,
+        rconPassword: 'secret'
+    });
+
+    let publicInfoReads = 0;
+    crcon.client = {
+        post: async () => ({ data: { result: { ok: true } } }),
+        get: async () => {
+            publicInfoReads += 1;
+            return {
+                data: {
+                    result: {
+                        currentMapName: 'Foy Warfare',
+                        nextMapName: 'Omaha Beach Warfare'
+                    }
+                }
+            };
+        }
+    };
+
+    crcon.executeDirectCommand = async (command) => {
+        if (command === 'GetServerInformation') {
+            return {
+                result: {
+                    currentIndex: 10,
+                    MapSequence: [
+                        { MapName: 'Foy', MapId: 'foy_warfare', position: 10 },
+                        { MapName: 'St. Mere Eglise', MapId: 'stmereeglise_warfare', position: 11 }
+                    ]
+                }
+            };
+        }
+
+        return { result: { ok: true } };
+    };
+
+    const result = await crcon.queueNextMap('stmereeglise_warfare');
+
+    assert.equal(result.queuedState.nextMapId, 'stmereeglise_warfare');
+    assert.equal(result.verification.source, 'direct-sequence');
+    assert.equal(result.verification.verified, true);
+    assert.equal(publicInfoReads, 1);
+});
+
 test('queueNextMap can send a full managed rotation while verifying the selected next map', async () => {
     const crcon = new CRCONService({
         serverName: 'Test Server',
