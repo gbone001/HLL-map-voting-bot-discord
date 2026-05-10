@@ -1725,13 +1725,37 @@ class MapVotingService {
                 );
 
                 logger.info(`[MapVoting S${this.serverNum}] Applying selected map to managed rotation: ${mapId}`);
-                await this.applyManagedRotationSelection(
-                    mapId,
-                    queueStrategy === 'direct-sequence-start' ? 'vote-result-session-zero' : 'vote-result',
-                    this.getActiveScheduleSettings(),
-                    allMaps,
-                    { queueStrategy, currentMapId }
-                );
+                try {
+                    await this.applyManagedRotationSelection(
+                        mapId,
+                        queueStrategy === 'direct-sequence-start' ? 'vote-result-session-zero' : 'vote-result',
+                        this.getActiveScheduleSettings(),
+                        allMaps,
+                        { queueStrategy, currentMapId }
+                    );
+                } catch (selectionError) {
+                    const canRetryWithDirectSequenceStart =
+                        queueStrategy !== 'direct-sequence-start' &&
+                        /Queued next map mismatch/i.test(selectionError?.message || '') &&
+                        typeof this.crcon?.supportsDirectSessionPolling === 'function' &&
+                        this.crcon.supportsDirectSessionPolling();
+
+                    if (!canRetryWithDirectSequenceStart) {
+                        throw selectionError;
+                    }
+
+                    logger.warn(
+                        `[MapVoting S${this.serverNum}] Managed-rotation queue verification mismatched for ${mapId}; retrying once with direct sequence-start queueing`
+                    );
+
+                    await this.applyManagedRotationSelection(
+                        mapId,
+                        'vote-result-sequence-start-fallback',
+                        this.getActiveScheduleSettings(),
+                        allMaps,
+                        { queueStrategy: 'direct-sequence-start', currentMapId }
+                    );
+                }
             } else {
                 logger.warn(`[MapVoting S${this.serverNum}] Could not determine next map`);
             }
