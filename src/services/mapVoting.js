@@ -104,6 +104,8 @@ class MapVotingService {
         this.pendingQueuedMapMaxHoldMs = 3 * 60 * 60 * 1000;
         this.lastObservedSessionRemainingMatchTime = null;
         this.managedRotationPoolMapIds = [];
+        this.pendingManagedRotationPoolSync = false;
+        this.lastDeferredManagedRotationMapId = null;
     }
 
     // ==================== INITIALIZATION ====================
@@ -601,8 +603,44 @@ class MapVotingService {
 
         // Clear cache to pick up new whitelist
         this.clearCache();
-        await this.syncManagedRotationPool(schedule);
+        const syncedManagedRotationPool = await this.syncManagedRotationPool(schedule, null, {
+            deferWhenPendingQueuedWinner: true,
+            syncSource: 'schedule-apply'
+        });
+
+        if (!syncedManagedRotationPool && this.pendingManagedRotationPoolSync) {
+            logger.info(
+                `[MapVoting S${this.serverNum}] Deferred schedule rotation sync until pending queued winner is no longer active`
+            );
+            return;
+        }
+
+        this.pendingManagedRotationPoolSync = false;
         this.pendingScheduleTransition = false;
+    }
+
+    async maybeSyncDeferredManagedRotationPool() {
+        if (!this.pendingManagedRotationPoolSync) {
+            return false;
+        }
+
+        const syncedManagedRotationPool = await this.syncManagedRotationPool(
+            this.getActiveScheduleSettings(),
+            null,
+            {
+                deferWhenPendingQueuedWinner: true,
+                syncSource: 'deferred'
+            }
+        );
+
+        if (!syncedManagedRotationPool) {
+            return false;
+        }
+
+        this.pendingManagedRotationPoolSync = false;
+        this.pendingScheduleTransition = false;
+        logger.info(`[MapVoting S${this.serverNum}] Applied deferred managed rotation sync`);
+        return true;
     }
 
     async applyScheduleAutomods(schedule) {
@@ -772,7 +810,12 @@ class MapVotingService {
         return [selectedMapId, ...remainingMapIds];
     }
 
-    async syncManagedRotationPool(schedule = null, allMaps = null) {
+    async syncManagedRotationPool(schedule = null, allMaps = null, options = {}) {
+        const {
+            deferWhenPendingQueuedWinner = false,
+            syncSource = 'unknown'
+        } = options;
+
         if (typeof this.crcon?.replaceMapRotation !== 'function') {
             throw new Error('CRCON replaceMapRotation support is required for bot-managed map pools');
         }
@@ -785,6 +828,21 @@ class MapVotingService {
         }
 
         const pendingQueuedMapId = this.getPendingQueuedMap()?.mapId || null;
+
+        if (deferWhenPendingQueuedWinner && pendingQueuedMapId) {
+            this.pendingManagedRotationPoolSync = true;
+
+            if (this.lastDeferredManagedRotationMapId !== pendingQueuedMapId) {
+                logger.info(
+                    `[MapVoting S${this.serverNum}] Deferring managed rotation sync (${syncSource}) while queued winner ${pendingQueuedMapId} is pending`
+                );
+                this.lastDeferredManagedRotationMapId = pendingQueuedMapId;
+            }
+
+            return false;
+        }
+
+        this.lastDeferredManagedRotationMapId = null;
         const effectivePoolMapIds = pendingQueuedMapId
             ? [pendingQueuedMapId, ...poolMapIds.filter((mapId) => mapId !== pendingQueuedMapId)]
             : poolMapIds;

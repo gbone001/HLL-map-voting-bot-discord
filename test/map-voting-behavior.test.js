@@ -433,6 +433,70 @@ test('managed rotation sync preserves pending queued winner at the front of rota
     ]);
 });
 
+test('managed rotation sync can defer while a queued winner is pending', async () => {
+    const service = new MapVotingService(1);
+    let replaceCalls = 0;
+
+    service.crcon = {
+        replaceMapRotation: async () => {
+            replaceCalls += 1;
+        }
+    };
+    service.getManagedRotationPoolMapIds = async () => [
+        'foy_warfare',
+        'carentan_warfare'
+    ];
+    service.getPendingQueuedMap = () => ({
+        mapId: 'stmereeglise_warfare',
+        source: 'vote-result',
+        queuedAt: Date.now()
+    });
+
+    const synced = await service.syncManagedRotationPool(null, null, {
+        deferWhenPendingQueuedWinner: true,
+        syncSource: 'test'
+    });
+
+    assert.equal(synced, false);
+    assert.equal(replaceCalls, 0);
+    assert.equal(service.pendingManagedRotationPoolSync, true);
+});
+
+test('deferred managed rotation sync applies once pending queued winner clears', async () => {
+    const service = new MapVotingService(1);
+    const appliedRotations = [];
+    let pendingQueuedMap = {
+        mapId: 'stmereeglise_warfare',
+        source: 'vote-result',
+        queuedAt: Date.now()
+    };
+
+    service.pendingManagedRotationPoolSync = true;
+    service.crcon = {
+        replaceMapRotation: async (mapIds) => {
+            appliedRotations.push([...mapIds]);
+        }
+    };
+    service.getActiveScheduleSettings = () => ({
+        whitelist: ['foy_warfare', 'carentan_warfare']
+    });
+    service.getManagedRotationPoolMapIds = async () => [
+        'foy_warfare',
+        'carentan_warfare'
+    ];
+    service.getPendingQueuedMap = () => pendingQueuedMap;
+
+    const firstAttempt = await service.maybeSyncDeferredManagedRotationPool();
+    assert.equal(firstAttempt, false);
+    assert.equal(appliedRotations.length, 0);
+
+    pendingQueuedMap = null;
+    const secondAttempt = await service.maybeSyncDeferredManagedRotationPool();
+    assert.equal(secondAttempt, true);
+    assert.equal(service.pendingManagedRotationPoolSync, false);
+    assert.deepEqual(appliedRotations[0], ['foy_warfare', 'carentan_warfare']);
+});
+
 test('getMapsToVote includes skirmish options when skirmish weight is enabled', async () => {
     const service = new MapVotingService(1);
     service.mapsPerVote = 4;
