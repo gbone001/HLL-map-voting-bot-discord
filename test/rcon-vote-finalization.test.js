@@ -467,6 +467,32 @@ test('queueNextMap throws when verified queued map does not match the requested 
     assert.equal(verificationReads, 4);
 });
 
+test('queueNextMap accepts a loosely equivalent map variant when CRCON normalizes the queued map', async () => {
+    const crcon = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_ONLY,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token'
+    });
+
+    crcon.client = {
+        post: async () => ({ data: { result: { ok: true } } }),
+        get: async () => ({
+            data: {
+                result: {
+                    currentMapName: 'Foy Warfare',
+                    nextMapName: 'Utah Beach Warfare'
+                }
+            }
+        })
+    };
+
+    const result = await crcon.queueNextMap('utahbeach_warfare_night');
+
+    assert.equal(result.queuedState.nextMapId, 'utahbeach_warfare');
+    assert.equal(result.verification.verified, false);
+});
+
 test('queueNextMap tolerates a stale public-info read before the queued map settles', async () => {
     const crcon = new CRCONService({
         serverName: 'Test Server',

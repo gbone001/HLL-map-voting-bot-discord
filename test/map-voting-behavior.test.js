@@ -401,6 +401,38 @@ test('seeded polling clears an overwritten queued winner and allows a new vote',
     assert.equal(service.getPendingQueuedMap(), null);
 });
 
+test('managed rotation sync preserves pending queued winner at the front of rotation', async () => {
+    const service = new MapVotingService(1);
+    const appliedRotations = [];
+
+    service.crcon = {
+        replaceMapRotation: async (mapIds) => {
+            appliedRotations.push([...mapIds]);
+        }
+    };
+    service.getManagedRotationPoolMapIds = async () => [
+        'foy_warfare',
+        'carentan_warfare',
+        'utahbeach_warfare'
+    ];
+    service.getPendingQueuedMap = () => ({
+        mapId: 'stmereeglise_warfare',
+        source: 'vote-result',
+        queuedAt: Date.now()
+    });
+
+    const synced = await service.syncManagedRotationPool();
+
+    assert.equal(synced, true);
+    assert.equal(appliedRotations.length, 1);
+    assert.deepEqual(appliedRotations[0], [
+        'stmereeglise_warfare',
+        'foy_warfare',
+        'carentan_warfare',
+        'utahbeach_warfare'
+    ]);
+});
+
 test('getMapsToVote includes skirmish options when skirmish weight is enabled', async () => {
     const service = new MapVotingService(1);
     service.mapsPerVote = 4;
@@ -1196,6 +1228,7 @@ test('loading the active schedule map pool replaces the managed server rotation'
         { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day' },
         { id: 'kursk_warfare', pretty_name: 'Kursk Warfare', game_mode: 'warfare', environment: 'day' }
     ]);
+    service.getPendingQueuedMap = () => null;
 
     const applied = await service.loadScheduleMapPoolAsRotation();
 

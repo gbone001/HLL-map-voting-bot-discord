@@ -1185,9 +1185,20 @@ class CRCONService {
 
         const { queuedState, verification } = await this.verifyQueuedNextMap(mapId);
 
-        if (queuedState?.nextMapId && !this.areMapReferencesEquivalent(queuedState.nextMapId, mapId)) {
+        const strictMatch = queuedState?.nextMapId && this.areMapReferencesEquivalent(queuedState.nextMapId, mapId);
+        const looseMatch = queuedState?.nextMapId
+            && !strictMatch
+            && this.areMapReferencesLooselyEquivalent(queuedState.nextMapId, mapId);
+
+        if (queuedState?.nextMapId && !strictMatch && !looseMatch) {
             throw new Error(
                 `Queued next map mismatch: expected ${mapId} but observed ${queuedState.nextMapId} via ${queuedState.source}`
+            );
+        }
+
+        if (queuedState?.nextMapId && looseMatch) {
+            logger.warn(
+                `[CRCON ${this.serverName}] Queued map variant differed from requested map; expected=${mapId} observed=${queuedState.nextMapId} (accepted via loose identity match)`
             );
         }
 

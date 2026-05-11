@@ -784,10 +784,21 @@ class MapVotingService {
             return false;
         }
 
-        await this.crcon.replaceMapRotation(poolMapIds);
-        this.managedRotationPoolMapIds = poolMapIds;
+        const pendingQueuedMapId = this.getPendingQueuedMap()?.mapId || null;
+        const effectivePoolMapIds = pendingQueuedMapId
+            ? [pendingQueuedMapId, ...poolMapIds.filter((mapId) => mapId !== pendingQueuedMapId)]
+            : poolMapIds;
+
+        if (pendingQueuedMapId) {
+            logger.info(
+                `[MapVoting S${this.serverNum}] Preserving pending queued winner ${pendingQueuedMapId} at the front of managed rotation sync`
+            );
+        }
+
+        await this.crcon.replaceMapRotation(effectivePoolMapIds);
+        this.managedRotationPoolMapIds = effectivePoolMapIds;
         logger.info(
-            `[MapVoting S${this.serverNum}] Synced managed rotation pool with ${poolMapIds.length} map(s): ${poolMapIds.join(', ')}`
+            `[MapVoting S${this.serverNum}] Synced managed rotation pool with ${effectivePoolMapIds.length} map(s): ${effectivePoolMapIds.join(', ')}`
         );
         return true;
     }
