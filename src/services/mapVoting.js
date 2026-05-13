@@ -1623,21 +1623,23 @@ class MapVotingService {
             const recentGeneralMapKeys = typeof options === 'object' && options !== null
                 ? options.recentGeneralMapKeys || new Set()
                 : new Set();
-            const candidateMapByVoteLabel = new Map(
-                (candidateMaps || []).flatMap((map) => {
-                    const entries = [[this.getVoteLabel(map), map]];
-                    if (map.pretty_name && map.pretty_name !== this.getVoteLabel(map)) {
-                        entries.push([map.pretty_name, map]);
-                    }
-                    return entries;
-                })
-            );
+            const persistedVote = this.gameStart
+                ? voteStore.getVote(this.gameStart, this.serverNum)
+                : null;
+
+            const answerMap = new Map();
+
+            for (const entry of persistedVote?.maps || []) {
+                if (entry?.pollKey && entry?.map) {
+                    answerMap.set(entry.pollKey, entry.map);
+                }
+            }
 
             let candidates = [];
             let bestEligibleVoteCount = null;
 
             for (const [answerText, voteCount] of mapResults) {
-                const matchingMap = candidateMapByVoteLabel.get(answerText);
+                const matchingMap = answerMap.get(answerText);
                 if (!matchingMap) {
                     continue;
                 }
@@ -1879,7 +1881,20 @@ class MapVotingService {
 
             const pollData = {
                 question: { text: 'Vote for the next map:' },
-                answers: this.maps.map((map) => ({ text: this.getVoteLabel(map) })),
+                answers: (() => {
+                    const voteLabels = this.maps.map((map) => this.getVoteLabel(map));
+                    const duplicateLabels = voteLabels.filter((label, index) => voteLabels.indexOf(label) !== index);
+
+                    if (duplicateLabels.length > 0) {
+                        throw new Error(
+                            `Duplicate vote labels detected: ${[...new Set(duplicateLabels)].join(', ')}`
+                        );
+                    }
+
+                    return voteLabels.map((label, index) => ({
+                        text: `[${index + 1}] ${label}`
+                    }));
+                })(),
                 duration: 2,
                 allowMultiselect: false
             };
@@ -1889,7 +1904,15 @@ class MapVotingService {
 
             // Store vote in database
             if (this.gameStart) {
-                voteStore.setVote(this.voteMessageId, this.gameStart, this.serverNum, this.maps);
+                voteStore.setVote(
+                    this.voteMessageId,
+                    this.gameStart,
+                    this.serverNum,
+                    this.maps.map((map, index) => ({
+                        pollKey: `[${index + 1}] ${this.getVoteLabel(map)}`,
+                        map
+                    }))
+                );
             }
 
             if (confirmedCurrentMapId) {
