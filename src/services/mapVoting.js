@@ -101,11 +101,12 @@ class MapVotingService {
         this.voteFinalizationFailureCount = 0;
         this.maxVoteFinalizationRetries = 3;
         this.skipNextUnseededMatchEndRotation = false;
-        this.pendingQueuedMapMaxHoldMs = 3 * 60 * 60 * 1000;
+        this.pendingQueuedMapMaxHoldMs = 45 * 60 * 1000;
         this.lastObservedSessionRemainingMatchTime = null;
         this.managedRotationPoolMapIds = [];
         this.pendingManagedRotationPoolSync = false;
         this.lastDeferredManagedRotationMapId = null;
+        this.voteStartGateBlockCount = 0;
     }
 
     // ==================== INITIALIZATION ====================
@@ -314,6 +315,14 @@ class MapVotingService {
             logger.warn(
                 `[MapVoting S${this.serverNum}] Could not verify pending queued winner ${pendingQueuedMap.mapId}: ${error.message}`
             );
+        }
+
+        if (!queuedState) {
+            logger.warn(
+                `[MapVoting S${this.serverNum}] Clearing pending queued winner ${pendingQueuedMap.mapId} because queued-map verification returned no state`
+            );
+            this.clearPendingQueuedMap();
+            return false;
         }
 
         if (queuedState?.nextMapId === pendingQueuedMap.mapId) {
@@ -1975,6 +1984,7 @@ class MapVotingService {
 
             this.voteFinalizationFailureCount = 0;
             this.voteActive = false;
+            this.voteStartGateBlockCount = 0;
             logger.info(`[MapVoting S${this.serverNum}] Vote stopped`);
             return finalizedMapId;
         } catch (error) {
@@ -1997,6 +2007,11 @@ class MapVotingService {
                 if (gameStart) {
                     voteStore.deleteVote(gameStart, this.serverNum);
                 }
+
+                // Clear vote-start map gate after terminal failures so a broken finalization
+                // state does not block future votes on the same live map indefinitely.
+                this.lastVoteStartedForCurrentMapId = null;
+                this.voteStartGateBlockCount = 0;
 
                 if (keepVoteActiveOnFailure && !canRetryFinalization) {
                     logger.warn(
@@ -2116,11 +2131,16 @@ class MapVotingService {
                     }
 
                     if (this.lastVoteStartedForCurrentMapId === confirmedCurrentMapId) {
-                        logger.info(
-                            `[MapVoting S${this.serverNum}] Waiting for confirmed live map change before starting a new vote; current map is still ${confirmedCurrentMapId}`
-                        );
+                        this.voteStartGateBlockCount += 1;
+                        if (this.voteStartGateBlockCount === 1 || this.voteStartGateBlockCount % 12 === 0) {
+                            logger.info(
+                                `[MapVoting S${this.serverNum}] Waiting for confirmed live map change before starting a new vote; current map is still ${confirmedCurrentMapId}`
+                            );
+                        }
                         return;
                     }
+
+                    this.voteStartGateBlockCount = 0;
 
                     logger.info(`[MapVoting S${this.serverNum}] Starting vote...`);
                     await this.clearAllMessages();
@@ -2242,6 +2262,7 @@ class MapVotingService {
         this.seeded = false;
         this.skipNextUnseededMatchEndRotation = false;
         this.lastVoteStartedForCurrentMapId = null;
+        this.voteStartGateBlockCount = 0;
         this.lastObservedSessionRemainingMatchTime = null;
         this.managedRotationPoolMapIds = [];
     }

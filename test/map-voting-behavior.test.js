@@ -401,6 +401,46 @@ test('seeded polling clears an overwritten queued winner and allows a new vote',
     assert.equal(service.getPendingQueuedMap(), null);
 });
 
+test('seeded polling clears pending queued winner when queued-map verification is unavailable', async () => {
+    const service = new MapVotingService(1);
+    let startVoteCalls = 0;
+    let pendingQueuedMap = {
+        mapId: 'foy_warfare',
+        source: 'vote-result',
+        queuedAt: Date.now()
+    };
+
+    service.voteMapActive = true;
+    service.seeded = true;
+    service.voteActive = false;
+    service.gameActive = true;
+    service.minimumPlayers = 25;
+    service.deactivatePlayers = 10;
+    service.applyScheduleSettings = async () => {};
+    service.getGameState = async () => true;
+    service.getAllMaps = async () => [];
+    service.getCurrentMapId = async () => 'carentan_warfare';
+    service.crcon = {
+        getStatus: async () => ({ result: { current_players: 40 } }),
+        readQueuedNextMapState: async () => {
+            throw new Error('queued-map state unavailable');
+        }
+    };
+    service.clearAllMessages = async () => {};
+    service.startVote = async () => {
+        startVoteCalls += 1;
+    };
+    service.getPendingQueuedMap = () => pendingQueuedMap;
+    service.clearPendingQueuedMap = () => {
+        pendingQueuedMap = null;
+    };
+
+    await service.doMapVote();
+
+    assert.equal(startVoteCalls, 1);
+    assert.equal(service.getPendingQueuedMap(), null);
+});
+
 test('managed rotation sync preserves pending queued winner at the front of rotation', async () => {
     const service = new MapVotingService(1);
     const appliedRotations = [];
@@ -806,6 +846,7 @@ test('stopVote clears active vote state on non-retryable queued-map mismatch fai
     service.gameStart = gameStart;
     service.voteMessageId = messageId;
     service.voteActive = true;
+    service.lastVoteStartedForCurrentMapId = 'foy_warfare';
     service.voteMessage = {
         poll: {
             end: async () => {}
@@ -820,6 +861,7 @@ test('stopVote clears active vote state on non-retryable queued-map mismatch fai
 
         assert.equal(finalizedMapId, null);
         assert.equal(service.voteActive, false);
+        assert.equal(service.lastVoteStartedForCurrentMapId, null);
         assert.equal(voteStore.getVote(gameStart, serverNum), null);
         assert.equal(service.voteFinalizationFailureCount, 0);
     } finally {
