@@ -301,6 +301,7 @@ class ScheduleManager {
     }
 
     // Check if time is within a range (handles overnight ranges)
+    // End boundary is inclusive so schedules cover their stated end minute with no gap.
     isTimeInRange(currentTime, startTime, endTime) {
         const current = this.parseTime(currentTime);
         const start = this.parseTime(startTime);
@@ -308,10 +309,10 @@ class ScheduleManager {
 
         if (start <= end) {
             // Normal range (e.g., 09:00 - 17:00)
-            return current >= start && current < end;
+            return current >= start && current <= end;
         } else {
             // Overnight range (e.g., 22:00 - 06:00)
-            return current >= start || current < end;
+            return current >= start || current <= end;
         }
     }
 
@@ -356,7 +357,7 @@ class ScheduleManager {
         const matchesLateWindow = this.isDayMatch(currentDay, scheduleDays) && currentMinutes >= startMinutes;
         const matchesAfterMidnightWindow = previousDay !== null
             && this.isDayMatch(previousDay, scheduleDays)
-            && currentMinutes < endMinutes;
+            && currentMinutes <= endMinutes;
 
         return matchesLateWindow || matchesAfterMidnightWindow;
     }

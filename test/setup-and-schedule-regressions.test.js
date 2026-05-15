@@ -704,3 +704,64 @@ test('schedule automod application warns instead of erroring for unsupported dir
         logger.error = originalError;
     }
 });
+
+// ── Schedule boundary / gap regression tests ────────────────────────────────
+// Previously isTimeInRange used exclusive-end (current < end), which created a
+// 1-minute dead-zone at the exact end minute of every schedule.  For the live
+// config (PeakHours 15:00-23:00, OffPeak 23:01-14:59) this meant that at
+// exactly 23:00 neither schedule matched and the fallback (all maps, including
+// peak-only maps like driel_warfare) was used.  End boundaries are now
+// inclusive (current <= end).
+
+test('isTimeInRange includes the exact end minute of a normal range', () => {
+    // 15:00-23:00: the minute 23:00 must be inside PeakHours
+    assert.equal(scheduleManager.isTimeInRange('23:00', '15:00', '23:00'), true, '23:00 should be inside 15:00-23:00');
+    assert.equal(scheduleManager.isTimeInRange('22:59', '15:00', '23:00'), true, '22:59 should be inside 15:00-23:00');
+    assert.equal(scheduleManager.isTimeInRange('15:00', '15:00', '23:00'), true, '15:00 should be inside 15:00-23:00');
+    assert.equal(scheduleManager.isTimeInRange('14:59', '15:00', '23:00'), false, '14:59 should be outside 15:00-23:00');
+    assert.equal(scheduleManager.isTimeInRange('23:01', '15:00', '23:00'), false, '23:01 should be outside 15:00-23:00');
+});
+
+test('isTimeInRange includes the exact end minute of an overnight range', () => {
+    // 23:01-14:59: the minute 14:59 must be inside OffPeak
+    assert.equal(scheduleManager.isTimeInRange('14:59', '23:01', '14:59'), true, '14:59 should be inside 23:01-14:59');
+    assert.equal(scheduleManager.isTimeInRange('00:00', '23:01', '14:59'), true, '00:00 should be inside 23:01-14:59');
+    assert.equal(scheduleManager.isTimeInRange('23:01', '23:01', '14:59'), true, '23:01 should be inside 23:01-14:59');
+    assert.equal(scheduleManager.isTimeInRange('15:00', '23:01', '14:59'), false, '15:00 should be outside 23:01-14:59');
+    assert.equal(scheduleManager.isTimeInRange('23:00', '23:01', '14:59'), false, '23:00 should be outside 23:01-14:59');
+});
+
+test('scheduleMatchesDateTime has no gap between PeakHours and OffPeak at 23:00', () => {
+    const peakSchedule = {
+        id: 'peak',
+        name: 'PeakHours',
+        startTime: '15:00',
+        endTime: '23:00',
+        days: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
+        enabled: true
+    };
+    const offPeakSchedule = {
+        id: 'offpeak',
+        name: 'Off Peak',
+        startTime: '23:01',
+        endTime: '14:59',
+        days: ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'],
+        enabled: true
+    };
+
+    // At 23:00 PeakHours must match (was broken: fell to default/all-maps)
+    assert.equal(scheduleManager.scheduleMatchesDateTime('mon', '23:00', peakSchedule), true, 'PeakHours must match at 23:00');
+    assert.equal(scheduleManager.scheduleMatchesDateTime('mon', '23:00', offPeakSchedule), false, 'OffPeak must NOT match at 23:00');
+
+    // At 23:01 OffPeak takes over
+    assert.equal(scheduleManager.scheduleMatchesDateTime('mon', '23:01', peakSchedule), false, 'PeakHours must NOT match at 23:01');
+    assert.equal(scheduleManager.scheduleMatchesDateTime('mon', '23:01', offPeakSchedule), true, 'OffPeak must match at 23:01');
+
+    // At 14:59 OffPeak still holds (was broken: fell to default/all-maps)
+    assert.equal(scheduleManager.scheduleMatchesDateTime('tue', '14:59', offPeakSchedule), true, 'OffPeak must match at 14:59');
+    assert.equal(scheduleManager.scheduleMatchesDateTime('tue', '14:59', peakSchedule), false, 'PeakHours must NOT match at 14:59');
+
+    // At 15:00 PeakHours starts
+    assert.equal(scheduleManager.scheduleMatchesDateTime('tue', '15:00', peakSchedule), true, 'PeakHours must match at 15:00');
+    assert.equal(scheduleManager.scheduleMatchesDateTime('tue', '15:00', offPeakSchedule), false, 'OffPeak must NOT match at 15:00');
+});
