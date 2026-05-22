@@ -1657,6 +1657,12 @@ class MapVotingService {
                     queueStrategy: this.getQueueStrategyForMapApplication()
                 }
             );
+            // Strictly enforce schedule whitelist even in non-seeded mode
+            await this.syncManagedRotationPool(
+                this.getActiveScheduleSettings(),
+                allMaps,
+                { syncSource: 'non-seeded-rotation' }
+            );
             logger.info(`[MapVoting S${this.serverNum}] Applied non-seeded rotation map: ${selectedMap.id}`);
             return true;
         } catch (error) {
