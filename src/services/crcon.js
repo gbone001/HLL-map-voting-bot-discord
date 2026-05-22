@@ -1236,30 +1236,29 @@ class CRCONService {
             throw new Error(`Direct RCON sequence-start queueing is not enabled for ${this.serverName}`);
         }
 
-        const response = await this.moveDirectMapToSequenceIndex(mapId, 0, 'set_map_rotation');
-        const sequenceState = await this.readDirectSequenceState();
-        const queuedEntry = sequenceState.entries.find((entry) => entry.sequencePosition === 0) || null;
-        const strictMatch = queuedEntry?.id && this.areMapReferencesEquivalent(queuedEntry.id, mapId);
-        const looseMatch = queuedEntry?.id && !strictMatch && this.areMapReferencesLooselyEquivalent(queuedEntry.id, mapId);
+        const response = await this.setDirectNextMap(mapId);
+        const queuedState = await this.readDirectQueuedNextMapState();
+        const observedMapId = queuedState?.nextMapId || null;
+        const strictMatch = observedMapId && this.areMapReferencesEquivalent(observedMapId, mapId);
+        const looseMatch = observedMapId && !strictMatch && this.areMapReferencesLooselyEquivalent(observedMapId, mapId);
 
-        if (!queuedEntry?.id || (!strictMatch && !looseMatch)) {
+        if (!observedMapId || (!strictMatch && !looseMatch)) {
             throw new Error(
-                `Queued next map mismatch at sequence position 0: expected ${mapId} but observed ${queuedEntry?.id || 'none'}`
+                `Queued next map mismatch at direct next sequence position: expected ${mapId} but observed ${observedMapId || 'none'}`
             );
         }
 
         if (looseMatch) {
             logger.warn(
-                `[CRCON ${this.serverName}] Sequence-start queued map variant differed from requested map; expected=${mapId} observed=${queuedEntry.id} (accepted via loose identity match)`
+                `[CRCON ${this.serverName}] Direct queued map variant differed from requested map; expected=${mapId} observed=${observedMapId} (accepted via loose identity match)`
             );
         }
 
         return {
             response,
             queuedState: {
-                currentMapId: this.currentMatchMapId,
-                nextMapId: queuedEntry.id,
-                source: 'direct-sequence-position-0'
+                ...queuedState,
+                source: queuedState?.source || 'direct-sequence-next'
             }
         };
     }

@@ -720,7 +720,7 @@ test('queueNextMap accepts direct RCON aliases that refer to the same queued map
     assert.equal(result.queuedState.nextMapId, 'stmariedumont_warfare');
 });
 
-test('queueNextMapAtSequenceStart moves the voted map to sequence position 0 for session-end queueing', async () => {
+test('queueNextMapAtSequenceStart moves the voted map to the direct next sequence position', async () => {
     const crcon = new CRCONService({
         serverName: 'Test Server',
         transportMode: TRANSPORT_MODES.API_WITH_FALLBACK,
@@ -778,7 +778,7 @@ test('queueNextMapAtSequenceStart moves the voted map to sequence position 0 for
         },
         {
             command: 'MoveMapInSequence',
-            payload: { CurrentIndex: 15, NewIndex: 0 },
+            payload: { CurrentIndex: 15, NewIndex: 11 },
             endpoint: 'set_map_rotation'
         },
         {
@@ -789,7 +789,7 @@ test('queueNextMapAtSequenceStart moves the voted map to sequence position 0 for
     ]);
 });
 
-test('queueNextMapAtSequenceStart accepts loose-equivalent map variants at sequence position 0', async () => {
+test('queueNextMapAtSequenceStart accepts loose-equivalent map variants at the direct next sequence position', async () => {
     const crcon = new CRCONService({
         serverName: 'Test Server',
         transportMode: TRANSPORT_MODES.API_WITH_FALLBACK,
@@ -805,7 +805,8 @@ test('queueNextMapAtSequenceStart accepts loose-equivalent map variants at seque
         MapSequence: [
             { MapName: 'Utah Beach', MapId: 'utahbeach_warfare', position: 0 },
             { MapName: 'Foy', MapId: 'foy_warfare', position: 9 },
-            { MapName: 'Omaha Beach', MapId: 'omahabeach_warfare', position: 10 }
+            { MapName: 'Omaha Beach', MapId: 'omahabeach_warfare', position: 10 },
+            { MapName: 'Utah Beach Night', MapId: 'utahbeach_warfare', position: 15 }
         ]
     };
 
@@ -825,6 +826,21 @@ test('queueNextMapAtSequenceStart accepts loose-equivalent map variants at seque
                     }
                     return entry;
                 });
+            return { result: { ok: true } };
+        }
+
+        if (command === 'AddMapToSequence') {
+            sequenceState.MapSequence = sequenceState.MapSequence
+                .map((entry) => (
+                    entry.position >= payload.Index
+                        ? { ...entry, position: entry.position + 1 }
+                        : entry
+                ));
+            sequenceState.MapSequence.push({
+                MapName: 'Utah Beach Night',
+                MapId: 'utahbeach_warfare',
+                position: payload.Index
+            });
             return { result: { ok: true } };
         }
 
