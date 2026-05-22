@@ -284,6 +284,43 @@ class MapVotingService {
         voteStore.setState(this.getPendingQueuedMapStateKey(), null);
     }
 
+    hasDirectSequenceQueueing() {
+        return (
+            typeof this.crcon?.supportsDirectSessionPolling === 'function' &&
+            this.crcon.supportsDirectSessionPolling() &&
+            typeof this.crcon?.queueNextMapAtSequenceStart === 'function'
+        );
+    }
+
+    getQueueStrategyForMapApplication() {
+        return this.hasDirectSequenceQueueing() ? 'direct-sequence-start' : 'default';
+    }
+
+    mapReferencesMatch(leftMapId, rightMapId, options = {}) {
+        if (!leftMapId || !rightMapId) {
+            return false;
+        }
+
+        if (leftMapId === rightMapId) {
+            return true;
+        }
+
+        if (typeof this.crcon?.areMapReferencesEquivalent === 'function' &&
+            this.crcon.areMapReferencesEquivalent(leftMapId, rightMapId)) {
+            return true;
+        }
+
+        return Boolean(
+            options.loose &&
+            typeof this.crcon?.areMapReferencesLooselyEquivalent === 'function' &&
+            this.crcon.areMapReferencesLooselyEquivalent(leftMapId, rightMapId)
+        );
+    }
+
+    isPendingQueuedMapExpired(pendingQueuedMap) {
+        return (Date.now() - (pendingQueuedMap?.queuedAt || 0)) > this.pendingQueuedMapMaxHoldMs;
+    }
+
     async shouldDeferNewVoteForQueuedWinner() {
         const pendingQueuedMap = this.getPendingQueuedMap();
         if (!pendingQueuedMap?.mapId) {
@@ -292,7 +329,7 @@ class MapVotingService {
 
         const allMaps = await this.getAllMaps();
         const currentMapId = await this.getCurrentMapId(allMaps);
-        if (currentMapId === pendingQueuedMap.mapId) {
+        if (this.mapReferencesMatch(currentMapId, pendingQueuedMap.mapId, { loose: true })) {
             logger.info(
                 `[MapVoting S${this.serverNum}] Queued winner ${pendingQueuedMap.mapId} is now live; clearing pending guard`
             );
@@ -301,11 +338,18 @@ class MapVotingService {
         }
 
         if (typeof this.crcon?.readQueuedNextMapState !== 'function') {
+            if (this.isPendingQueuedMapExpired(pendingQueuedMap)) {
+                logger.warn(
+                    `[MapVoting S${this.serverNum}] Clearing pending queued winner ${pendingQueuedMap.mapId} because the transport cannot verify queued-map state`
+                );
+                this.clearPendingQueuedMap();
+                return false;
+            }
+
             logger.warn(
-                `[MapVoting S${this.serverNum}] Clearing pending queued winner ${pendingQueuedMap.mapId} because the transport cannot verify queued-map state`
+                `[MapVoting S${this.serverNum}] Deferring new vote because queued-map verification is unavailable while winner ${pendingQueuedMap.mapId} is pending`
             );
-            this.clearPendingQueuedMap();
-            return false;
+            return true;
         }
 
         let queuedState = null;
@@ -318,21 +362,69 @@ class MapVotingService {
         }
 
         if (!queuedState) {
+            if (this.isPendingQueuedMapExpired(pendingQueuedMap)) {
+                logger.warn(
+                    `[MapVoting S${this.serverNum}] Clearing pending queued winner ${pendingQueuedMap.mapId} because queued-map verification returned no state`
+                );
+                this.clearPendingQueuedMap();
+                return false;
+            }
+
             logger.warn(
-                `[MapVoting S${this.serverNum}] Clearing pending queued winner ${pendingQueuedMap.mapId} because queued-map verification returned no state`
+                `[MapVoting S${this.serverNum}] Deferring new vote because queued-map verification returned no state while winner ${pendingQueuedMap.mapId} is pending`
+            );
+            return true;
+        }
+
+        if (this.mapReferencesMatch(queuedState?.currentMapId, pendingQueuedMap.mapId, { loose: true })) {
+            logger.info(
+                `[MapVoting S${this.serverNum}] Queued winner ${pendingQueuedMap.mapId} is now live; clearing pending guard`
             );
             this.clearPendingQueuedMap();
             return false;
         }
 
-        if (queuedState?.nextMapId === pendingQueuedMap.mapId) {
+        if (this.mapReferencesMatch(queuedState?.nextMapId, pendingQueuedMap.mapId, { loose: true })) {
             logger.info(
                 `[MapVoting S${this.serverNum}] Deferring new vote because queued winner ${pendingQueuedMap.mapId} is still pending`
             );
             return true;
         }
 
-        if (queuedState?.nextMapId && queuedState.nextMapId !== pendingQueuedMap.mapId) {
+        if (
+            queuedState?.source === 'public-info' &&
+            typeof this.crcon?.readDirectQueuedNextMapState === 'function' &&
+            this.crcon.hasDirectRconConfigured?.()
+        ) {
+            try {
+                const directQueuedState = await this.crcon.readDirectQueuedNextMapState();
+
+                if (this.mapReferencesMatch(directQueuedState?.currentMapId, pendingQueuedMap.mapId, { loose: true })) {
+                    logger.info(
+                        `[MapVoting S${this.serverNum}] Queued winner ${pendingQueuedMap.mapId} is now live via direct sequence; clearing pending guard`
+                    );
+                    this.clearPendingQueuedMap();
+                    return false;
+                }
+
+                if (this.mapReferencesMatch(directQueuedState?.nextMapId, pendingQueuedMap.mapId, { loose: true })) {
+                    logger.info(
+                        `[MapVoting S${this.serverNum}] Deferring new vote because direct sequence still has queued winner ${pendingQueuedMap.mapId} pending`
+                    );
+                    return true;
+                }
+
+                if (directQueuedState?.nextMapId || directQueuedState?.currentMapId) {
+                    queuedState = directQueuedState;
+                }
+            } catch (error) {
+                logger.warn(
+                    `[MapVoting S${this.serverNum}] Direct verification of pending queued winner ${pendingQueuedMap.mapId} failed: ${error.message}`
+                );
+            }
+        }
+
+        if (queuedState?.nextMapId && !this.mapReferencesMatch(queuedState.nextMapId, pendingQueuedMap.mapId, { loose: true })) {
             logger.warn(
                 `[MapVoting S${this.serverNum}] Queued winner ${pendingQueuedMap.mapId} was overwritten externally by ${queuedState.nextMapId}; clearing pending guard`
             );
@@ -340,7 +432,7 @@ class MapVotingService {
             return false;
         }
 
-        if ((Date.now() - pendingQueuedMap.queuedAt) > this.pendingQueuedMapMaxHoldMs) {
+        if (this.isPendingQueuedMapExpired(pendingQueuedMap)) {
             logger.warn(
                 `[MapVoting S${this.serverNum}] Pending queued winner ${pendingQueuedMap.mapId} exceeded hold window without verification; clearing pending guard`
             );
@@ -886,6 +978,8 @@ class MapVotingService {
 
         if (queueStrategy === 'direct-sequence-start' && typeof this.crcon?.queueNextMapAtSequenceStart === 'function') {
             await this.crcon.queueNextMapAtSequenceStart(selectedMapId);
+        } else if (queueStrategy === 'direct-sequence-start') {
+            throw new Error('Direct sequence-start queueing was requested but is not available');
         } else if (typeof this.crcon?.queueNextMap === 'function') {
             await this.crcon.queueNextMap(selectedMapId, rotationOrder);
         } else if (typeof this.crcon?.replaceMapRotation === 'function') {
@@ -1542,7 +1636,10 @@ class MapVotingService {
                 'non-seeded-rotation',
                 this.getActiveScheduleSettings(),
                 allMaps,
-                { currentMapId }
+                {
+                    currentMapId,
+                    queueStrategy: this.getQueueStrategyForMapApplication()
+                }
             );
             logger.info(`[MapVoting S${this.serverNum}] Applied non-seeded rotation map: ${selectedMap.id}`);
             return true;
@@ -1832,8 +1929,7 @@ class MapVotingService {
                     const canRetryWithDirectSequenceStart =
                         queueStrategy !== 'direct-sequence-start' &&
                         /Queued next map mismatch/i.test(selectionError?.message || '') &&
-                        typeof this.crcon?.supportsDirectSessionPolling === 'function' &&
-                        this.crcon.supportsDirectSessionPolling();
+                        this.hasDirectSequenceQueueing();
 
                     if (!canRetryWithDirectSequenceStart) {
                         throw selectionError;
@@ -2109,11 +2205,7 @@ class MapVotingService {
             const shouldFinalizeFromSessionTimer = directSessionTimerState.timerExpired && this.voteActive;
 
             if (shouldFinalizeFromSessionTimer || (!this.gameActive && this.voteActive)) {
-                const directSequenceQueueAvailable =
-                    typeof this.crcon?.supportsDirectSessionPolling === 'function' &&
-                    this.crcon.supportsDirectSessionPolling() &&
-                    typeof this.crcon?.queueNextMapAtSequenceStart === 'function';
-                const queueStrategy = directSequenceQueueAvailable ? 'direct-sequence-start' : 'default';
+                const queueStrategy = this.getQueueStrategyForMapApplication();
                 const finalizationReason = shouldFinalizeFromSessionTimer
                     ? 'Direct RCON session timer reached zero'
                     : 'Match closure detected';
@@ -2156,7 +2248,10 @@ class MapVotingService {
 
             if (justDroppedOutOfSeeded && this.voteActive) {
                 logger.info(`[MapVoting S${this.serverNum}] Seeded state lost while vote active, finalizing current vote`);
-                const finalizedMapId = await this.stopVote({ keepVoteActiveOnFailure: true });
+                const finalizedMapId = await this.stopVote({
+                    keepVoteActiveOnFailure: true,
+                    queueStrategy: this.getQueueStrategyForMapApplication()
+                });
                 if (finalizedMapId) {
                     this.skipNextUnseededMatchEndRotation = true;
                     finalizedVoteThisTick = true;

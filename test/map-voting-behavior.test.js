@@ -199,7 +199,7 @@ test('active vote is finalized when seeded state is lost mid-match', async () =>
 
 test('active vote is finalized when player count drops below minimumPlayers mid-match', async () => {
     const service = new MapVotingService(1);
-    let stopVoteCalls = 0;
+    const stopVoteCalls = [];
     let seedingMessageCalls = 0;
 
     service.voteMapActive = true;
@@ -211,10 +211,12 @@ test('active vote is finalized when player count drops below minimumPlayers mid-
     service.applyScheduleSettings = async () => {};
     service.getGameState = async () => true;
     service.crcon = {
+        supportsDirectSessionPolling: () => true,
+        queueNextMapAtSequenceStart: async () => {},
         getStatus: async () => ({ result: { current_players: 24 } })
     };
-    service.stopVote = async () => {
-        stopVoteCalls += 1;
+    service.stopVote = async (options = {}) => {
+        stopVoteCalls.push(options);
         service.voteActive = false;
     };
     service.clearAllMessages = async () => {};
@@ -225,7 +227,12 @@ test('active vote is finalized when player count drops below minimumPlayers mid-
 
     await service.doMapVote();
 
-    assert.equal(stopVoteCalls, 1);
+    assert.deepEqual(stopVoteCalls, [
+        {
+            keepVoteActiveOnFailure: true,
+            queueStrategy: 'direct-sequence-start'
+        }
+    ]);
     assert.equal(seedingMessageCalls, 1);
     assert.equal(service.voteActive, false);
     assert.equal(service.seeded, false);
@@ -448,7 +455,7 @@ test('seeded polling clears an overwritten queued winner and allows a new vote',
     assert.equal(service.getPendingQueuedMap(), null);
 });
 
-test('seeded polling clears pending queued winner when queued-map verification is unavailable', async () => {
+test('seeded polling defers pending queued winner when queued-map verification is temporarily unavailable', async () => {
     const service = new MapVotingService(1);
     let startVoteCalls = 0;
     let pendingQueuedMap = {
@@ -484,8 +491,98 @@ test('seeded polling clears pending queued winner when queued-map verification i
 
     await service.doMapVote();
 
+    assert.equal(startVoteCalls, 0);
+    assert.equal(service.getPendingQueuedMap().mapId, 'foy_warfare');
+});
+
+test('seeded polling clears pending queued winner after verification is unavailable beyond hold window', async () => {
+    const service = new MapVotingService(1);
+    let startVoteCalls = 0;
+    let pendingQueuedMap = {
+        mapId: 'foy_warfare',
+        source: 'vote-result',
+        queuedAt: Date.now() - (46 * 60 * 1000)
+    };
+
+    service.voteMapActive = true;
+    service.seeded = true;
+    service.voteActive = false;
+    service.gameActive = true;
+    service.minimumPlayers = 25;
+    service.deactivatePlayers = 10;
+    service.applyScheduleSettings = async () => {};
+    service.getGameState = async () => true;
+    service.getAllMaps = async () => [];
+    service.getCurrentMapId = async () => 'carentan_warfare';
+    service.crcon = {
+        getStatus: async () => ({ result: { current_players: 40 } }),
+        readQueuedNextMapState: async () => {
+            throw new Error('queued-map state unavailable');
+        }
+    };
+    service.clearAllMessages = async () => {};
+    service.startVote = async () => {
+        startVoteCalls += 1;
+    };
+    service.getPendingQueuedMap = () => pendingQueuedMap;
+    service.clearPendingQueuedMap = () => {
+        pendingQueuedMap = null;
+    };
+
+    await service.doMapVote();
+
     assert.equal(startVoteCalls, 1);
     assert.equal(service.getPendingQueuedMap(), null);
+});
+
+test('seeded polling trusts direct sequence when public-info reports a stale overwritten queued winner', async () => {
+    const service = new MapVotingService(1);
+    let startVoteCalls = 0;
+    let pendingQueuedMap = {
+        mapId: 'stmariedumont_warfare',
+        source: 'vote-result',
+        queuedAt: Date.now()
+    };
+
+    service.voteMapActive = true;
+    service.seeded = true;
+    service.voteActive = false;
+    service.gameActive = true;
+    service.minimumPlayers = 25;
+    service.deactivatePlayers = 10;
+    service.applyScheduleSettings = async () => {};
+    service.getGameState = async () => true;
+    service.getAllMaps = async () => [];
+    service.getCurrentMapId = async () => 'utahbeach_warfare_night';
+    service.crcon = {
+        getStatus: async () => ({ result: { current_players: 40 } }),
+        hasDirectRconConfigured: () => true,
+        areMapReferencesEquivalent: (left, right) => left === right,
+        areMapReferencesLooselyEquivalent: (left, right) => left === right,
+        readQueuedNextMapState: async () => ({
+            currentMapId: 'utahbeach_warfare_night',
+            nextMapId: 'foy_warfare',
+            source: 'public-info'
+        }),
+        readDirectQueuedNextMapState: async () => ({
+            currentMapId: 'utahbeach_warfare_night',
+            nextMapId: 'stmariedumont_warfare',
+            source: 'direct-sequence'
+        })
+    };
+    service.clearAllMessages = async () => {};
+    service.startVote = async () => {
+        startVoteCalls += 1;
+    };
+    service.getPendingQueuedMap = () => pendingQueuedMap;
+    service.clearPendingQueuedMap = () => {
+        pendingQueuedMap = null;
+    };
+
+    await service.doMapVote();
+
+    assert.equal(startVoteCalls, 0);
+    assert.equal(service.getPendingQueuedMap().mapId, 'stmariedumont_warfare');
 });
 
 test('managed rotation sync preserves pending queued winner at the front of rotation', async () => {
@@ -1332,6 +1429,55 @@ test('non-seeded rotation avoids re-selecting the current map when alternatives 
     }
 });
 
+test('non-seeded rotation uses direct sequence queueing when direct RCON is available', async () => {
+    const originalConfig = JSON.parse(JSON.stringify(configManager.config));
+    const service = new MapVotingService(1);
+    let queuedMapId = null;
+    let replaceRotationCalls = 0;
+
+    configManager.config.servers = {
+        ...configManager.config.servers,
+        1: {
+            ...(configManager.config.servers?.[1] || {}),
+            nonSeededMapList: ['utahbeach_warfare']
+        }
+    };
+
+    service.blacklist = [];
+    service.getAllMaps = async () => ([
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Omaha Beach' } },
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Utah Beach' } }
+    ]);
+    service.getRecentExclusionContext = async () => ({
+        recentMapIds: new Set(['omahabeach_warfare']),
+        recentGeneralMapKeys: new Set(['omaha beach']),
+        currentMapId: 'omahabeach_warfare',
+        currentGeneralMapKey: 'omaha beach',
+        historyAvailable: true,
+        hasExactRepeatProtection: true,
+        reliable: true
+    });
+    service.crcon = {
+        supportsDirectSessionPolling: () => true,
+        queueNextMapAtSequenceStart: async (mapId) => {
+            queuedMapId = mapId;
+        },
+        replaceMapRotation: async () => {
+            replaceRotationCalls += 1;
+        }
+    };
+
+    try {
+        const applied = await service.applyNonSeededRotation();
+
+        assert.equal(applied, true);
+        assert.equal(queuedMapId, 'utahbeach_warfare');
+        assert.equal(replaceRotationCalls, 0);
+    } finally {
+        configManager.config = originalConfig;
+    }
+});
+
 test('non-seeded rotation returns false when verified queueing rejects the selected map', async () => {
     const originalConfig = JSON.parse(JSON.stringify(configManager.config));
     const service = new MapVotingService(1);
@@ -1428,6 +1574,29 @@ test('managed rotation queueing preserves the full map pool with the selected ma
         'omahabeach_warfare'
     ]);
     assert.deepEqual(rotationOrder, queuedRotationMapIds);
+});
+
+test('managed rotation selection fails closed when direct queueing is requested but unavailable', async () => {
+    const service = new MapVotingService(1);
+    let queueNextMapCalls = 0;
+
+    service.crcon = {
+        queueNextMap: async () => {
+            queueNextMapCalls += 1;
+        }
+    };
+
+    await assert.rejects(
+        () => service.applyManagedRotationSelection(
+            'utahbeach_warfare',
+            'test-selection',
+            { whitelist: ['utahbeach_warfare'] },
+            [{ id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day' }],
+            { queueStrategy: 'direct-sequence-start' }
+        ),
+        /Direct sequence-start queueing was requested but is not available/
+    );
+    assert.equal(queueNextMapCalls, 0);
 });
 
 test('managed rotation queueing anchors selected map after current map outside schedule pool', async () => {
