@@ -2109,7 +2109,11 @@ class MapVotingService {
             const shouldFinalizeFromSessionTimer = directSessionTimerState.timerExpired && this.voteActive;
 
             if (shouldFinalizeFromSessionTimer || (!this.gameActive && this.voteActive)) {
-                const queueStrategy = shouldFinalizeFromSessionTimer ? 'direct-sequence-start' : 'default';
+                const directSequenceQueueAvailable =
+                    typeof this.crcon?.supportsDirectSessionPolling === 'function' &&
+                    this.crcon.supportsDirectSessionPolling() &&
+                    typeof this.crcon?.queueNextMapAtSequenceStart === 'function';
+                const queueStrategy = directSequenceQueueAvailable ? 'direct-sequence-start' : 'default';
                 const finalizationReason = shouldFinalizeFromSessionTimer
                     ? 'Direct RCON session timer reached zero'
                     : 'Match closure detected';

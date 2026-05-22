@@ -74,6 +74,52 @@ test('match-end detection finalizes an active vote before status polling succeed
     assert.equal(service.voteActive, false);
 });
 
+test('match-end finalization uses direct sequence queueing when direct RCON is available', async () => {
+    const service = new MapVotingService(1);
+    const stopVoteCalls = [];
+
+    service.voteMapActive = true;
+    service.seeded = true;
+    service.voteActive = true;
+    service.gameActive = true;
+    service.minimumPlayers = 50;
+    service.deactivatePlayers = 40;
+    service.applyScheduleSettings = async () => {};
+    service.getGameState = async () => {
+        service.gameActive = false;
+        return false;
+    };
+    service.crcon = {
+        supportsDirectSessionPolling: () => true,
+        queueNextMapAtSequenceStart: async () => {},
+        getDirectSessionInfo: async () => ({
+            remainingMatchTime: null,
+            matchTime: null,
+            mapId: 'utahbeach_warfare_night'
+        }),
+        getStatus: async () => ({ result: { current_players: 70 } })
+    };
+    service.stopVote = async (options = {}) => {
+        stopVoteCalls.push(options);
+        service.voteActive = false;
+        return 'stmariedumont_warfare';
+    };
+    service.clearAllMessages = async () => {};
+    service.startVote = async () => {
+        throw new Error('startVote should not run in the same tick as match-end finalization');
+    };
+
+    await service.doMapVote();
+
+    assert.deepEqual(stopVoteCalls, [
+        {
+            keepVoteActiveOnFailure: true,
+            queueStrategy: 'direct-sequence-start'
+        }
+    ]);
+    assert.equal(service.voteActive, false);
+});
+
 test('direct RCON session timer reaching zero finalizes an active vote with sequence-start queueing', async () => {
     const service = new MapVotingService(1);
     const stopVoteCalls = [];
@@ -88,6 +134,7 @@ test('direct RCON session timer reaching zero finalizes an active vote with sequ
     service.getGameState = async () => true;
     service.crcon = {
         supportsDirectSessionPolling: () => true,
+        queueNextMapAtSequenceStart: async () => {},
         getDirectSessionInfo: async () => ({
             remainingMatchTime: 0,
             matchTime: 5400,
