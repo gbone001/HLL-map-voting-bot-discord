@@ -552,8 +552,14 @@ class MapVotingService {
             );
 
             for (const answer of poll.answers.values()) {
+                const normalizedAnswerText = String(answer.text || '')
+                    .replace(/^\s*\[\d+\]\s*/, '')
+                    .trim();
                 const matchingMap = mapByVoteLabel.get(answer.text) ||
-                    allMaps.find((map) => map.pretty_name === answer.text);
+                    mapByVoteLabel.get(normalizedAnswerText) ||
+                    allMaps.find((map) => map.pretty_name === answer.text) ||
+                    allMaps.find((map) => map.pretty_name === normalizedAnswerText) ||
+                    allMaps.find((map) => map.id === normalizedAnswerText);
                 if (matchingMap) {
                     maps.push(this.formatMapForVote(matchingMap));
                 }

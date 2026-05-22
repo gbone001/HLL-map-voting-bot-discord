@@ -825,6 +825,7 @@ test('seeded polling waits for a confirmed live map change before starting the n
     service.getGameState = async () => true;
     service.getAllMaps = async () => [];
     service.getCurrentMapId = async () => currentMapId;
+    service.getPendingQueuedMap = () => null;
     service.crcon = {
         getStatus: async () => ({ result: { current_players: 40 } })
     };
@@ -874,6 +875,39 @@ test('API-only transport does not use direct session timer polling for vote fina
     assert.equal(directSessionInfoCalls, 0);
     assert.equal(stopVoteCalls, 0);
     assert.equal(service.voteActive, true);
+});
+
+test('resume vote maps from numbered Discord poll answer labels', async () => {
+    const service = new MapVotingService(1);
+
+    service.getAllMaps = async () => ([
+        {
+            id: 'stmariedumont_warfare',
+            pretty_name: 'St. Marie Du Mont Warfare',
+            game_mode: 'warfare',
+            environment: 'day',
+            map: { name: 'St. Marie Du Mont' }
+        },
+        {
+            id: 'carentan_warfare',
+            pretty_name: 'Carentan Warfare',
+            game_mode: 'warfare',
+            environment: 'day',
+            map: { name: 'Carentan' }
+        }
+    ]);
+
+    const maps = await service.getMapsFromPoll({
+        answers: new Map([
+            ['1', { text: '[1] St. Marie Du Mont Warfare' }],
+            ['2', { text: '[2] Carentan Warfare' }]
+        ])
+    });
+
+    assert.deepEqual(maps.map((map) => map.id), [
+        'stmariedumont_warfare',
+        'carentan_warfare'
+    ]);
 });
 
 test('duplicate vote finalization claims do not overwrite the first selected map', async () => {
