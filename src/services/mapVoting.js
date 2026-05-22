@@ -804,11 +804,7 @@ class MapVotingService {
             return uniquePoolMapIds;
         }
 
-        if (
-            currentMapId &&
-            currentMapId !== selectedMapId &&
-            uniquePoolMapIds.includes(currentMapId)
-        ) {
+        if (currentMapId && currentMapId !== selectedMapId) {
             const remainingMapIds = uniquePoolMapIds.filter((mapId) => (
                 mapId !== currentMapId && mapId !== selectedMapId
             ));
@@ -1635,6 +1631,25 @@ class MapVotingService {
                 }
             }
 
+            for (const [index, map] of (candidateMaps || []).entries()) {
+                if (!map?.id) {
+                    continue;
+                }
+
+                const voteLabel = this.getVoteLabel(map);
+                for (const answerText of [
+                    voteLabel,
+                    map.pretty_name,
+                    map.id,
+                    `[${index + 1}] ${voteLabel}`,
+                    `[${index + 1}] ${map.pretty_name || map.id}`
+                ]) {
+                    if (answerText && !answerMap.has(answerText)) {
+                        answerMap.set(answerText, map);
+                    }
+                }
+            }
+
             let candidates = [];
             let bestEligibleVoteCount = null;
 
@@ -2366,4 +2381,3 @@ class MapVotingService {
 }
 
 module.exports = { MapVotingService };
-

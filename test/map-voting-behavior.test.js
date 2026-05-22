@@ -1033,7 +1033,7 @@ test('vote finalization random fallback uses live poll options instead of stale 
 
 test('vote finalization uses the live Discord poll winner and queues that map', async () => {
     const service = new MapVotingService(1);
-    let queuedMapId = null;
+    let queuedRotationMapIds = null;
 
     service.voteMessageId = 'poll-message-live-winner';
     service.maps = [
@@ -1055,7 +1055,7 @@ test('vote finalization uses the live Discord poll winner and queues that map', 
     };
     service.crcon = {
         replaceMapRotation: async (mapIds) => {
-            queuedMapId = mapIds[0];
+            queuedRotationMapIds = mapIds;
         }
     };
     service.getAllMaps = async () => ([
@@ -1070,7 +1070,10 @@ test('vote finalization uses the live Discord poll winner and queues that map', 
     const mapId = await service.setVoteResult();
 
     assert.equal(mapId, 'omahabeach_warfare');
-    assert.equal(queuedMapId, 'omahabeach_warfare');
+    assert.deepEqual(queuedRotationMapIds.slice(0, 2), [
+        'foy_warfare',
+        'omahabeach_warfare'
+    ]);
 });
 
 test('vote finalization skips same-base-map winners that repeat the live map', async () => {
@@ -1375,6 +1378,45 @@ test('managed rotation queueing preserves the full map pool with the selected ma
     assert.deepEqual(queuedRotationMapIds, [
         'foy_warfare',
         'utahbeach_warfare',
+        'omahabeach_warfare'
+    ]);
+    assert.deepEqual(rotationOrder, queuedRotationMapIds);
+});
+
+test('managed rotation queueing anchors selected map after current map outside schedule pool', async () => {
+    const service = new MapVotingService(1);
+    let queuedMapId = null;
+    let queuedRotationMapIds = null;
+
+    service.crcon = {
+        queueNextMap: async (mapId, rotationMapIds) => {
+            queuedMapId = mapId;
+            queuedRotationMapIds = rotationMapIds;
+        }
+    };
+    service.getActiveScheduleSettings = () => ({
+        whitelist: ['foy_warfare', 'utahbeach_warfare', 'omahabeach_warfare']
+    });
+    service.getAllMaps = async () => ([
+        { id: 'foy_warfare', pretty_name: 'Foy Warfare', game_mode: 'warfare', environment: 'day' },
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day' },
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day' },
+        { id: 'elalamein_warfare', pretty_name: 'El Alamein Warfare', game_mode: 'warfare', environment: 'day' }
+    ]);
+
+    const rotationOrder = await service.applyManagedRotationSelection(
+        'utahbeach_warfare',
+        'test-selection',
+        service.getActiveScheduleSettings(),
+        await service.getAllMaps(),
+        { currentMapId: 'elalamein_warfare' }
+    );
+
+    assert.equal(queuedMapId, 'utahbeach_warfare');
+    assert.deepEqual(queuedRotationMapIds, [
+        'elalamein_warfare',
+        'utahbeach_warfare',
+        'foy_warfare',
         'omahabeach_warfare'
     ]);
     assert.deepEqual(rotationOrder, queuedRotationMapIds);

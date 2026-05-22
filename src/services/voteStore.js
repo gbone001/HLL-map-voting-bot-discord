@@ -43,7 +43,7 @@ class VoteStore {
             if (!fs.existsSync(dataDir)) {
                 fs.mkdirSync(dataDir, { recursive: true });
             }
-            const tempStorePath = `${STORE_PATH}.${process.pid}.tmp`;
+            const tempStorePath = `${STORE_PATH}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
             fs.writeFileSync(tempStorePath, JSON.stringify(this.votes, null, 2));
             fs.renameSync(tempStorePath, STORE_PATH);
             return true;

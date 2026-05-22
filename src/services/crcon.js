@@ -354,7 +354,7 @@ class CRCONService {
             case 'post:set_map':
                 return this.executeDirectCommand('ChangeMap', { MapName: data.map_name }, endpoint);
             case 'post:set_map_rotation':
-                return this.setDirectNextMap(data.map_names || []);
+                return this.setDirectNextMap(data.map_name || data.next_map_name || data.map_names || []);
             case 'post:add_map_to_rotation':
                 return this.executeDirectCommand(
                     'AddMapToRotation',
@@ -608,7 +608,7 @@ class CRCONService {
     }
 
     async setDirectNextMap(mapNames) {
-        const mapId = Array.isArray(mapNames) ? mapNames[0] : null;
+        const mapId = Array.isArray(mapNames) ? mapNames[0] : mapNames;
         if (!mapId) {
             throw new Error('set_map_rotation requires at least one map name');
         }
@@ -1180,7 +1180,13 @@ class CRCONService {
             mapNames.unshift(mapId);
         }
 
-        const response = await this.post('set_map_rotation', { map_names: mapNames });
+        const queuePayload = { map_names: mapNames };
+        Object.defineProperty(queuePayload, 'next_map_name', {
+            value: mapId,
+            enumerable: false
+        });
+
+        const response = await this.post('set_map_rotation', queuePayload);
         this.assertCommandSucceeded(response, 'set_map_rotation');
 
         const { queuedState, verification } = await this.verifyQueuedNextMap(mapId);

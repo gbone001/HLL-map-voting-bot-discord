@@ -9,6 +9,9 @@ function canUseDir(dirPath) {
     try {
         fs.mkdirSync(dirPath, { recursive: true });
         fs.accessSync(dirPath, fs.constants.W_OK);
+        const testPath = path.join(dirPath, `.write-test-${process.pid}-${Date.now()}`);
+        fs.writeFileSync(testPath, '');
+        fs.unlinkSync(testPath);
         return true;
     } catch {
         return false;
