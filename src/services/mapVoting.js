@@ -896,17 +896,10 @@ class MapVotingService {
         return [...new Set(poolMapIds.filter((mapId) => !this.blacklist.includes(mapId)))];
     }
 
-    buildManagedRotationOrder(poolMapIds, selectedMapId = null, currentMapId = null) {
+    buildManagedRotationOrder(poolMapIds, selectedMapId = null) {
         const uniquePoolMapIds = [...new Set((poolMapIds || []).filter(Boolean))];
         if (!selectedMapId) {
             return uniquePoolMapIds;
-        }
-
-        if (currentMapId && currentMapId !== selectedMapId) {
-            const remainingMapIds = uniquePoolMapIds.filter((mapId) => (
-                mapId !== currentMapId && mapId !== selectedMapId
-            ));
-            return [currentMapId, selectedMapId, ...remainingMapIds];
         }
 
         const remainingMapIds = uniquePoolMapIds.filter((mapId) => mapId !== selectedMapId);
@@ -977,17 +970,34 @@ class MapVotingService {
             throw new Error('applyManagedRotationSelection requires a selected map id');
         }
 
-        const basePoolMapIds = this.managedRotationPoolMapIds.length > 0
-            ? this.managedRotationPoolMapIds
-            : await this.getManagedRotationPoolMapIds(schedule, allMaps);
-        const rotationOrder = this.buildManagedRotationOrder(basePoolMapIds, selectedMapId, options.currentMapId || null);
+        const basePoolMapIds = await this.getManagedRotationPoolMapIds(schedule, allMaps);
+        const rotationOrder = this.buildManagedRotationOrder(basePoolMapIds, selectedMapId);
+
+        if (rotationOrder.length === 0) {
+            throw new Error('Managed rotation pool resolved to zero maps');
+        }
+
+        logger.info(
+            `[MapVoting S${this.serverNum}] Applying managed rotation (source=${source}): ${selectedMapId} first, pool=${rotationOrder.slice(0, 8).join(', ')}${rotationOrder.length > 8 ? '...' : ''}`
+        );
 
         if (queueStrategy === 'direct-sequence-start' && typeof this.crcon?.queueNextMapAtSequenceStart === 'function') {
             await this.crcon.queueNextMapAtSequenceStart(selectedMapId);
         } else if (queueStrategy === 'direct-sequence-start') {
             throw new Error('Direct sequence-start queueing was requested but is not available');
         } else if (typeof this.crcon?.queueNextMap === 'function') {
-            await this.crcon.queueNextMap(selectedMapId, rotationOrder);
+            const result = await this.crcon.queueNextMap(selectedMapId, rotationOrder);
+            if (
+                result?.queuedState?.nextMapId &&
+                !this.mapReferencesMatch(result.queuedState.nextMapId, selectedMapId, { loose: true }) &&
+                this.hasDirectSequenceQueueing()
+            ) {
+                logger.warn(
+                    `[MapVoting S${this.serverNum}] Queue verification failed for ${selectedMapId}, retrying once with direct sequence-start queueing`
+                );
+                await new Promise((resolve) => setTimeout(resolve, 1500));
+                await this.crcon.queueNextMapAtSequenceStart(selectedMapId);
+            }
         } else if (typeof this.crcon?.replaceMapRotation === 'function') {
             await this.crcon.replaceMapRotation(rotationOrder);
         } else {
@@ -1892,8 +1902,12 @@ class MapVotingService {
 
             // If no vote result (0 votes or error), pick random from available maps
             if (!mapId && candidateMaps.length > 0) {
+                const effectiveWhitelist = await this.getEffectiveWhitelist();
                 const fallbackCandidateMaps = candidateMaps.filter((candidateMap) => {
                     const candidateGeneralMapKey = this.getGeneralMapKey(candidateMap);
+                    if (effectiveWhitelist && !effectiveWhitelist.has(candidateMap.id)) {
+                        return false;
+                    }
                     if (currentMapId && candidateMap.id === currentMapId) {
                         return false;
                     }
@@ -2129,6 +2143,19 @@ class MapVotingService {
             this.voteFinalizationFailureCount = 0;
             this.voteActive = false;
             this.voteStartGateBlockCount = 0;
+            if (finalizedMapId) {
+                const pendingQueuedMap = this.getPendingQueuedMap();
+                if (
+                    pendingQueuedMap?.mapId &&
+                    !this.mapReferencesMatch(pendingQueuedMap.mapId, finalizedMapId, { loose: true })
+                ) {
+                    logger.warn(
+                        `[MapVoting S${this.serverNum}] Clearing stale pending queued map ${pendingQueuedMap.mapId} after successful finalization of ${finalizedMapId}`
+                    );
+                    this.clearPendingQueuedMap();
+                    this.setPendingQueuedMap(finalizedMapId, 'vote-finalization-success');
+                }
+            }
             logger.info(`[MapVoting S${this.serverNum}] Vote stopped`);
             return finalizedMapId;
         } catch (error) {
@@ -2261,6 +2288,12 @@ class MapVotingService {
                 if (finalizedMapId) {
                     this.skipNextUnseededMatchEndRotation = true;
                     finalizedVoteThisTick = true;
+                    if (typeof this.crcon?.replaceMapRotation === 'function') {
+                        await this.syncManagedRotationPool(this.getActiveScheduleSettings(), null, {
+                            deferWhenPendingQueuedWinner: false,
+                            syncSource: 'seeded-drop-post-finalization'
+                        });
+                    }
                 }
                 this.lastReminderTime = null;
             }
@@ -2310,6 +2343,12 @@ class MapVotingService {
                     if (this.skipNextUnseededMatchEndRotation) {
                         logger.info(`[MapVoting S${this.serverNum}] Skipping non-seeded rotation because a seeded vote already selected the next map`);
                         this.skipNextUnseededMatchEndRotation = false;
+                        if (typeof this.crcon?.replaceMapRotation === 'function') {
+                            await this.syncManagedRotationPool(this.getActiveScheduleSettings(), null, {
+                                deferWhenPendingQueuedWinner: false,
+                                syncSource: 'match-end-after-seeded-vote'
+                            });
+                        }
                     } else {
                         await this.applyNonSeededRotation();
                     }

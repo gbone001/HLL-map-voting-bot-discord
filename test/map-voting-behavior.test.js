@@ -1091,7 +1091,7 @@ test('vote finalization skips the live current map and picks the next highest el
     const mapId = await service.setVoteResult();
 
     assert.equal(mapId, 'carentan_warfare');
-    assert.deepEqual(appliedRotationMapIds.slice(0, 2), ['stmariedumont_warfare', 'carentan_warfare']);
+    assert.deepEqual(appliedRotationMapIds.slice(0, 2), ['carentan_warfare', 'stmariedumont_warfare']);
 });
 
 test('vote finalization prefers the live current map over stale status when excluding the live map', async () => {
@@ -1149,7 +1149,7 @@ test('vote finalization prefers the live current map over stale status when excl
     const mapId = await service.setVoteResult();
 
     assert.equal(mapId, 'utahbeach_warfare');
-    assert.deepEqual(appliedRotationMapIds.slice(0, 2), ['omahabeach_warfare', 'utahbeach_warfare']);
+    assert.deepEqual(appliedRotationMapIds.slice(0, 2), ['utahbeach_warfare', 'stmereeglise_warfare']);
 });
 
 test('vote finalization random fallback uses live poll options instead of stale in-memory maps', async () => {
@@ -1249,8 +1249,8 @@ test('vote finalization uses the live Discord poll winner and queues that map', 
 
     assert.equal(mapId, 'omahabeach_warfare');
     assert.deepEqual(queuedRotationMapIds.slice(0, 2), [
-        'foy_warfare',
-        'omahabeach_warfare'
+        'omahabeach_warfare',
+        'utahbeach_warfare'
     ]);
 });
 
@@ -1384,7 +1384,7 @@ test('vote finalization random fallback excludes the live current map when no vo
         const mapId = await service.setVoteResult();
 
         assert.equal(mapId, 'carentan_warfare');
-        assert.deepEqual(appliedRotationMapIds.slice(0, 2), ['stmariedumont_warfare', 'carentan_warfare']);
+        assert.deepEqual(appliedRotationMapIds.slice(0, 2), ['carentan_warfare', 'stmariedumont_warfare']);
     } finally {
         Math.random = originalRandom;
     }
@@ -1457,7 +1457,7 @@ test('non-seeded rotation avoids re-selecting the current map when alternatives 
         const applied = await service.applyNonSeededRotation();
 
         assert.equal(applied, true);
-        assert.deepEqual(appliedRotationMapIds.slice(0, 2), ['omahabeach_warfare', 'utahbeach_warfare']);
+        assert.deepEqual(appliedRotationMapIds.slice(0, 2), ['utahbeach_warfare', 'omahabeach_warfare']);
     } finally {
         configManager.config = originalConfig;
     }
@@ -1573,7 +1573,7 @@ test('loading the active schedule map pool replaces the managed server rotation'
     assert.deepEqual(service.managedRotationPoolMapIds, ['utahbeach_warfare', 'omahabeach_warfare']);
 });
 
-test('managed rotation queueing preserves the full map pool with the selected map after current map', async () => {
+test('managed rotation queueing preserves the full map pool with the selected map first', async () => {
     const service = new MapVotingService(1);
     let queuedMapId = null;
     let queuedRotationMapIds = null;
@@ -1603,8 +1603,8 @@ test('managed rotation queueing preserves the full map pool with the selected ma
 
     assert.equal(queuedMapId, 'utahbeach_warfare');
     assert.deepEqual(queuedRotationMapIds, [
-        'foy_warfare',
         'utahbeach_warfare',
+        'foy_warfare',
         'omahabeach_warfare'
     ]);
     assert.deepEqual(rotationOrder, queuedRotationMapIds);
@@ -1633,7 +1633,7 @@ test('managed rotation selection fails closed when direct queueing is requested 
     assert.equal(queueNextMapCalls, 0);
 });
 
-test('managed rotation queueing anchors selected map after current map outside schedule pool', async () => {
+test('managed rotation queueing keeps selection inside the active schedule pool', async () => {
     const service = new MapVotingService(1);
     let queuedMapId = null;
     let queuedRotationMapIds = null;
@@ -1664,12 +1664,53 @@ test('managed rotation queueing anchors selected map after current map outside s
 
     assert.equal(queuedMapId, 'utahbeach_warfare');
     assert.deepEqual(queuedRotationMapIds, [
-        'elalamein_warfare',
         'utahbeach_warfare',
         'foy_warfare',
         'omahabeach_warfare'
     ]);
     assert.deepEqual(rotationOrder, queuedRotationMapIds);
+});
+
+test('voted winner becomes next map and full schedule pool is applied', async () => {
+    const service = new MapVotingService(1);
+    const queueNextMapCalls = [];
+    const allMaps = [
+        { id: 'foy_warfare', pretty_name: 'Foy Warfare', game_mode: 'warfare', environment: 'day' },
+        { id: 'utahbeach_warfare', pretty_name: 'Utah Beach Warfare', game_mode: 'warfare', environment: 'day' },
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day' },
+        { id: 'kursk_warfare', pretty_name: 'Kursk Warfare', game_mode: 'warfare', environment: 'day' }
+    ];
+
+    service.blacklist = ['kursk_warfare'];
+    service.crcon = {
+        queueNextMap: async (mapId, rotationMapIds) => {
+            queueNextMapCalls.push({ mapId, rotationMapIds });
+            return {
+                queuedState: {
+                    nextMapId: mapId,
+                    source: 'test'
+                }
+            };
+        }
+    };
+    service.getActiveScheduleSettings = () => ({
+        whitelist: ['foy_warfare', 'utahbeach_warfare', 'omahabeach_warfare', 'kursk_warfare']
+    });
+    service.getAllMaps = async () => allMaps;
+
+    const rotationOrder = await service.applyManagedRotationSelection(
+        'utahbeach_warfare',
+        'test-vote-result',
+        service.getActiveScheduleSettings(),
+        allMaps
+    );
+
+    assert.deepEqual(queueNextMapCalls, [{
+        mapId: 'utahbeach_warfare',
+        rotationMapIds: ['utahbeach_warfare', 'foy_warfare', 'omahabeach_warfare']
+    }]);
+    assert.deepEqual(rotationOrder, ['utahbeach_warfare', 'foy_warfare', 'omahabeach_warfare']);
+    assert.deepEqual(service.managedRotationPoolMapIds, rotationOrder);
 });
 
 test('formatMapForVote emits a structured vote label from map, mode, and variant', () => {

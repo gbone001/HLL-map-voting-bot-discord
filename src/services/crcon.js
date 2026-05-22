@@ -20,7 +20,7 @@ const TRANSPORT_MODES = {
 
 const DEFAULT_CRCON_CIRCUIT_THRESHOLD = 3;
 const DEFAULT_CRCON_CIRCUIT_COOLDOWN_MS = 60 * 1000;
-const DEFAULT_QUEUE_VERIFICATION_ATTEMPTS = 4;
+const DEFAULT_QUEUE_VERIFICATION_ATTEMPTS = 3;
 const DEFAULT_QUEUE_VERIFICATION_DELAY_MS = 1500;
 
 class CRCONService {
@@ -354,7 +354,10 @@ class CRCONService {
             case 'post:set_map':
                 return this.executeDirectCommand('ChangeMap', { MapName: data.map_name }, endpoint);
             case 'post:set_map_rotation':
-                return this.setDirectNextMap(data.map_name || data.next_map_name || data.map_names || []);
+                return this.setDirectNextMap(data.map_name || data.next_map_name || data.map_names || [], {
+                    maxAttempts: DEFAULT_QUEUE_VERIFICATION_ATTEMPTS,
+                    delayMs: DEFAULT_QUEUE_VERIFICATION_DELAY_MS
+                });
             case 'post:add_map_to_rotation':
                 return this.executeDirectCommand(
                     'AddMapToRotation',
@@ -646,6 +649,7 @@ class CRCONService {
             }
 
             const queuedState = await this.readDirectQueuedNextMapState();
+            result.queuedState = queuedState;
             const observedMapId = queuedState?.nextMapId || null;
             const currentMapId = queuedState?.currentMapId || null;
             const nextMatches = observedMapId && (
@@ -1237,12 +1241,52 @@ class CRCONService {
         const response = await this.post('set_map_rotation', queuePayload);
         this.assertCommandSucceeded(response, 'set_map_rotation');
 
-        const { queuedState, verification } = await this.verifyQueuedNextMap(mapId);
+        const directQueuedState = response?.queuedState || null;
+        const directObservedMapId = directQueuedState?.nextMapId || null;
+        const directMatchesExpectedMap = directObservedMapId && (
+            this.areMapReferencesEquivalent(directObservedMapId, mapId) ||
+            this.areMapReferencesLooselyEquivalent(directObservedMapId, mapId)
+        );
+        const directCurrentMatchesExpectedMap = directQueuedState?.currentMapId && (
+            this.areMapReferencesEquivalent(directQueuedState.currentMapId, mapId) ||
+            this.areMapReferencesLooselyEquivalent(directQueuedState.currentMapId, mapId)
+        );
+        const verifiedDirectResponse = directQueuedState && (directMatchesExpectedMap || directCurrentMatchesExpectedMap);
+        const verifiedResult = directQueuedState
+            ? {
+                queuedState: directQueuedState,
+                verification: {
+                    expectedMapId: mapId,
+                    observedMapId: directObservedMapId,
+                    source: directQueuedState?.source || 'direct-sequence',
+                    authoritative: Boolean(directQueuedState?.authoritative),
+                    verified: Boolean(verifiedDirectResponse),
+                    attempts: response?.result?.attempts || 1
+                }
+            }
+            : await this.verifyQueuedNextMap(mapId);
+        const { queuedState, verification } = verifiedResult;
 
         const strictMatch = queuedState?.nextMapId && this.areMapReferencesEquivalent(queuedState.nextMapId, mapId);
         const looseMatch = queuedState?.nextMapId
             && !strictMatch
             && this.areMapReferencesLooselyEquivalent(queuedState.nextMapId, mapId);
+        const currentStrictMatch = queuedState?.currentMapId && this.areMapReferencesEquivalent(queuedState.currentMapId, mapId);
+        const currentLooseMatch = queuedState?.currentMapId
+            && !currentStrictMatch
+            && this.areMapReferencesLooselyEquivalent(queuedState.currentMapId, mapId);
+
+        if (currentStrictMatch || currentLooseMatch) {
+            logger.info(
+                `[CRCON ${this.serverName}] Queued map ${mapId} is already current after applying rotation`
+            );
+
+            return {
+                response,
+                queuedState,
+                verification
+            };
+        }
 
         if (queuedState?.nextMapId && !strictMatch && !looseMatch) {
             throw new Error(
@@ -1271,6 +1315,10 @@ class CRCONService {
 
             throw new Error(`Queued next map could not be verified for ${mapId}`);
         }
+
+        logger.info(
+            `[CRCON ${this.serverName}] Queued next map ${queuedState.nextMapId} using rotation: ${mapNames.join(', ')}`
+        );
 
         return {
             response,
@@ -1307,6 +1355,10 @@ class CRCONService {
                 `[CRCON ${this.serverName}] Direct queued map variant differed from requested map; expected=${mapId} observed=${observedMapId} (accepted via loose identity match)`
             );
         }
+
+        logger.info(
+            `[CRCON ${this.serverName}] Queued next map ${observedMapId || currentMapId} at direct sequence position after current map`
+        );
 
         return {
             response,

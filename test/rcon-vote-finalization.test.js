@@ -94,6 +94,7 @@ test('vote finalization in direct RCON mode moves an existing winner into the sl
         ]
     };
     crcon.hasDirectRconConfigured = () => true;
+    crcon.delay = async () => {};
     crcon.executeDirectCommand = async (command, payload, endpoint) => {
         commands.push({ command, payload, endpoint });
 
@@ -366,6 +367,12 @@ test('direct RCON next-map selection uses currentIndex instead of sequence posit
         }
 
         if (command === 'AddMapToSequence') {
+            sequenceState.mAPS = sequenceState.mAPS.map((entry) => {
+                if (entry.position >= payload.Index) {
+                    return { ...entry, position: entry.position + 1 };
+                }
+                return entry;
+            });
             sequenceState.mAPS.push({
                 name: payload.MapName,
                 iD: `/Game/Maps/${payload.MapName}`,
@@ -389,6 +396,11 @@ test('direct RCON next-map selection uses currentIndex instead of sequence posit
             command: 'AddMapToSequence',
             payload: { MapName: 'stmereeglise_warfare', Index: 11 },
             endpoint: 'set_map_rotation'
+        },
+        {
+            command: 'GetServerInformation',
+            payload: { Name: 'mapsequence', Value: '' },
+            endpoint: 'get_map_rotation'
         }
     ]);
 });
@@ -464,7 +476,7 @@ test('queueNextMap throws when verified queued map does not match the requested 
         () => crcon.queueNextMap('stmereeglise_warfare'),
         /Queued next map mismatch/
     );
-    assert.equal(verificationReads, 4);
+    assert.equal(verificationReads, 3);
 });
 
 test('queueNextMap accepts a loosely equivalent map variant when CRCON normalizes the queued map', async () => {
