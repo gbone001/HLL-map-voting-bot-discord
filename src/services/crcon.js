@@ -607,32 +607,72 @@ class CRCONService {
         };
     }
 
-    async setDirectNextMap(mapNames) {
+    async setDirectNextMap(mapNames, options = {}) {
         const mapId = Array.isArray(mapNames) ? mapNames[0] : mapNames;
         if (!mapId) {
             throw new Error('set_map_rotation requires at least one map name');
         }
 
-        const sequenceState = await this.readDirectSequenceState();
-        const currentIndex = Number.isInteger(sequenceState.currentIndex)
-            ? sequenceState.currentIndex
-            : 0;
-        const nextIndex = this.getDirectNextSequencePosition(sequenceState);
-        const moveResult = await this.moveDirectMapToSequenceIndex(
-            mapId,
-            nextIndex,
-            'set_map_rotation',
-            sequenceState
-        );
+        const maxAttempts = Number.isInteger(options.maxAttempts) ? options.maxAttempts : 1;
+        const delayMs = Number.isInteger(options.delayMs) ? options.delayMs : DEFAULT_QUEUE_VERIFICATION_DELAY_MS;
+        let lastResult = null;
 
-        return {
-            result: {
-                map_names: [mapId],
-                method: moveResult.action,
-                current_index: currentIndex,
-                next_index: nextIndex
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            const sequenceState = await this.readDirectSequenceState();
+            const currentIndex = Number.isInteger(sequenceState.currentIndex)
+                ? sequenceState.currentIndex
+                : 0;
+            const nextIndex = this.getDirectNextSequencePosition(sequenceState);
+            const moveResult = await this.moveDirectMapToSequenceIndex(
+                mapId,
+                nextIndex,
+                'set_map_rotation',
+                sequenceState
+            );
+            const result = {
+                result: {
+                    map_names: [mapId],
+                    method: moveResult.action,
+                    current_index: currentIndex,
+                    next_index: nextIndex,
+                    attempts: attempt
+                }
+            };
+
+            lastResult = result;
+
+            if (maxAttempts <= 1) {
+                return result;
             }
-        };
+
+            const queuedState = await this.readDirectQueuedNextMapState();
+            const observedMapId = queuedState?.nextMapId || null;
+            const currentMapId = queuedState?.currentMapId || null;
+            const nextMatches = observedMapId && (
+                this.areMapReferencesEquivalent(observedMapId, mapId) ||
+                this.areMapReferencesLooselyEquivalent(observedMapId, mapId)
+            );
+            const currentMatches = currentMapId && (
+                this.areMapReferencesEquivalent(currentMapId, mapId) ||
+                this.areMapReferencesLooselyEquivalent(currentMapId, mapId)
+            );
+
+            if (nextMatches || currentMatches) {
+                return {
+                    ...result,
+                    queuedState
+                };
+            }
+
+            if (attempt < maxAttempts) {
+                logger.warn(
+                    `[CRCON ${this.serverName}] Direct next-map queue attempt ${attempt}/${maxAttempts} did not stick for expected=${mapId}; current=${currentMapId || 'none'} next=${observedMapId || 'none'}`
+                );
+                await this.delay(delayMs);
+            }
+        }
+
+        return lastResult;
     }
 
     async getDirectSessionInfo() {
@@ -853,7 +893,15 @@ class CRCONService {
                 mapId,
                 entry?.MapName || entry?.name || entry?.Name || String(entry)
             );
-            const parsedPosition = Number.parseInt(entry?.position, 10);
+            const parsedPosition = Number.parseInt(
+                entry?.position ??
+                entry?.Position ??
+                entry?.Index ??
+                entry?.index ??
+                entry?.Sequence ??
+                entry?.sequence,
+                10
+            );
 
             return {
                 ...normalizedMap,
@@ -863,7 +911,7 @@ class CRCONService {
 
         entries.sort((left, right) => left.sequencePosition - right.sequencePosition);
 
-        const rawCurrentIndex = rawValue?.currentIndex ?? rawValue?.CurrentIndex;
+        const rawCurrentIndex = rawValue?.currentIndex ?? rawValue?.CurrentIndex ?? rawValue?.current_index;
         const parsedCurrentIndex = Number.parseInt(rawCurrentIndex, 10);
         const fallbackCurrentIndex = entries.find((entry) => entry.sequencePosition === 0)?.sequencePosition ?? 0;
 
@@ -1236,13 +1284,19 @@ class CRCONService {
             throw new Error(`Direct RCON sequence-start queueing is not enabled for ${this.serverName}`);
         }
 
-        const response = await this.setDirectNextMap(mapId);
-        const queuedState = await this.readDirectQueuedNextMapState();
+        const response = await this.setDirectNextMap(mapId, {
+            maxAttempts: 3,
+            delayMs: DEFAULT_QUEUE_VERIFICATION_DELAY_MS
+        });
+        const queuedState = response.queuedState || await this.readDirectQueuedNextMapState();
         const observedMapId = queuedState?.nextMapId || null;
+        const currentMapId = queuedState?.currentMapId || null;
         const strictMatch = observedMapId && this.areMapReferencesEquivalent(observedMapId, mapId);
         const looseMatch = observedMapId && !strictMatch && this.areMapReferencesLooselyEquivalent(observedMapId, mapId);
+        const currentStrictMatch = currentMapId && this.areMapReferencesEquivalent(currentMapId, mapId);
+        const currentLooseMatch = currentMapId && !currentStrictMatch && this.areMapReferencesLooselyEquivalent(currentMapId, mapId);
 
-        if (!observedMapId || (!strictMatch && !looseMatch)) {
+        if (!currentStrictMatch && !currentLooseMatch && (!observedMapId || (!strictMatch && !looseMatch))) {
             throw new Error(
                 `Queued next map mismatch at direct next sequence position: expected ${mapId} but observed ${observedMapId || 'none'}`
             );

@@ -789,6 +789,76 @@ test('queueNextMapAtSequenceStart moves the voted map to the direct next sequenc
     ]);
 });
 
+test('queueNextMapAtSequenceStart retries when match transition advances the direct sequence index', async () => {
+    const crcon = new CRCONService({
+        serverName: 'Test Server',
+        transportMode: TRANSPORT_MODES.API_WITH_FALLBACK,
+        crconUrl: 'http://example.invalid',
+        crconToken: 'token',
+        rconHost: '127.0.0.1',
+        rconPort: 27015,
+        rconPassword: 'secret'
+    });
+
+    const commands = [];
+    let moveAttempts = 0;
+    const sequenceState = {
+        currentIndex: 10,
+        MapSequence: [
+            { MapName: 'Foy', MapId: 'foy_warfare', position: 10 },
+            { MapName: 'Kursk', MapId: 'kursk_warfare', position: 11 },
+            { MapName: 'Kharkov', MapId: 'kharkov_warfare', position: 15 }
+        ]
+    };
+
+    crcon.delay = async () => {};
+    crcon.executeDirectCommand = async (command, payload, endpoint) => {
+        commands.push({ command, payload, endpoint });
+
+        if (command === 'GetServerInformation') {
+            return { result: sequenceState };
+        }
+
+        if (command === 'MoveMapInSequence') {
+            moveAttempts += 1;
+
+            if (moveAttempts === 1) {
+                sequenceState.currentIndex = 11;
+                return { result: { ok: true } };
+            }
+
+            sequenceState.MapSequence = sequenceState.MapSequence
+                .map((entry) => {
+                    if (entry.position === payload.CurrentIndex) {
+                        return { ...entry, position: payload.NewIndex };
+                    }
+                    if (entry.position >= payload.NewIndex && entry.position < payload.CurrentIndex) {
+                        return { ...entry, position: entry.position + 1 };
+                    }
+                    return entry;
+                });
+            return { result: { ok: true } };
+        }
+
+        return { result: { ok: true } };
+    };
+
+    const result = await crcon.queueNextMapAtSequenceStart('kharkov_warfare');
+
+    assert.equal(result.queuedState.currentMapId, 'kursk_warfare');
+    assert.equal(result.queuedState.nextMapId, 'kharkov_warfare');
+    assert.equal(moveAttempts, 2);
+    assert.deepEqual(
+        commands
+            .filter((entry) => entry.command === 'MoveMapInSequence')
+            .map((entry) => entry.payload),
+        [
+            { CurrentIndex: 15, NewIndex: 11 },
+            { CurrentIndex: 15, NewIndex: 12 }
+        ]
+    );
+});
+
 test('queueNextMapAtSequenceStart accepts loose-equivalent map variants at the direct next sequence position', async () => {
     const crcon = new CRCONService({
         serverName: 'Test Server',

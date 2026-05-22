@@ -1946,6 +1946,10 @@ class MapVotingService {
     shouldRetryVoteFinalization(error) {
         const message = error?.message || '';
 
+        if (/direct next sequence position/i.test(message)) {
+            return true;
+        }
+
         if (/Queued next map mismatch/i.test(message)) {
             return false;
         }
