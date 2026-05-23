@@ -286,9 +286,11 @@ class MapVotingService {
 
     hasDirectSequenceQueueing() {
         return (
-            typeof this.crcon?.supportsDirectSessionPolling === 'function' &&
-            this.crcon.supportsDirectSessionPolling() &&
-            typeof this.crcon?.queueNextMapAtSequenceStart === 'function'
+            typeof this.crcon?.queueNextMapAtSequenceStart === 'function' &&
+            (
+                typeof this.crcon?.hasDirectRconConfigured !== 'function' ||
+                this.crcon.hasDirectRconConfigured()
+            )
         );
     }
 
@@ -981,7 +983,10 @@ class MapVotingService {
             `[MapVoting S${this.serverNum}] Applying managed rotation (source=${source}): ${selectedMapId} first, pool=${rotationOrder.slice(0, 8).join(', ')}${rotationOrder.length > 8 ? '...' : ''}`
         );
 
-        if (queueStrategy === 'direct-sequence-start' && typeof this.crcon?.queueNextMapAtSequenceStart === 'function') {
+        if (queueStrategy === 'direct-sequence-start' && this.hasDirectSequenceQueueing()) {
+            logger.info(
+                `[MapVoting S${this.serverNum}] Directly inserting ${selectedMapId} into the next map sequence slot`
+            );
             await this.crcon.queueNextMapAtSequenceStart(selectedMapId);
         } else if (queueStrategy === 'direct-sequence-start') {
             throw new Error('Direct sequence-start queueing was requested but is not available');
@@ -1647,6 +1652,7 @@ class MapVotingService {
                 );
             }
 
+            const queueStrategy = this.getQueueStrategyForMapApplication();
             await this.applyManagedRotationSelection(
                 selectedMap.id,
                 'non-seeded-rotation',
@@ -1654,15 +1660,17 @@ class MapVotingService {
                 allMaps,
                 {
                     currentMapId,
-                    queueStrategy: this.getQueueStrategyForMapApplication()
+                    queueStrategy
                 }
             );
-            // Strictly enforce schedule whitelist even in non-seeded mode
-            await this.syncManagedRotationPool(
-                this.getActiveScheduleSettings(),
-                allMaps,
-                { syncSource: 'non-seeded-rotation' }
-            );
+            if (queueStrategy !== 'direct-sequence-start') {
+                // Strictly enforce schedule whitelist when rotation writes are the map-application primitive.
+                await this.syncManagedRotationPool(
+                    this.getActiveScheduleSettings(),
+                    allMaps,
+                    { syncSource: 'non-seeded-rotation' }
+                );
+            }
             logger.info(`[MapVoting S${this.serverNum}] Applied non-seeded rotation map: ${selectedMap.id}`);
             return true;
         } catch (error) {

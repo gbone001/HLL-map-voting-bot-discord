@@ -110,7 +110,7 @@ class CRCONService {
     }
 
     supportsDirectSessionPolling() {
-        return this.isDirectFallbackEnabled() && this.hasDirectRconConfigured();
+        return this.hasDirectRconConfigured();
     }
 
     supportsCapability(capability) {
@@ -1328,7 +1328,7 @@ class CRCONService {
     }
 
     async queueNextMapAtSequenceStart(mapId) {
-        if (!this.supportsDirectSessionPolling()) {
+        if (!this.hasDirectRconConfigured()) {
             throw new Error(`Direct RCON sequence-start queueing is not enabled for ${this.serverName}`);
         }
 
