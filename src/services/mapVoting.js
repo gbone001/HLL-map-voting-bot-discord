@@ -983,11 +983,36 @@ class MapVotingService {
             `[MapVoting S${this.serverNum}] Applying managed rotation (source=${source}): ${selectedMapId} first, pool=${rotationOrder.slice(0, 8).join(', ')}${rotationOrder.length > 8 ? '...' : ''}`
         );
 
+        let pendingQueuedMapId = selectedMapId;
+
         if (queueStrategy === 'direct-sequence-start' && this.hasDirectSequenceQueueing()) {
             logger.info(
                 `[MapVoting S${this.serverNum}] Directly inserting ${selectedMapId} into the next map sequence slot`
             );
-            await this.crcon.queueNextMapAtSequenceStart(selectedMapId);
+            const result = await this.crcon.queueNextMapAtSequenceStart(selectedMapId);
+            const queuedState = result?.queuedState || null;
+            const selectedIsCurrent = this.mapReferencesMatch(queuedState?.currentMapId, selectedMapId, { loose: true });
+            const selectedIsNext = this.mapReferencesMatch(queuedState?.nextMapId, selectedMapId, { loose: true });
+
+            if (selectedIsCurrent && !selectedIsNext) {
+                const followUpMapId = rotationOrder.find((mapId) => (
+                    !this.mapReferencesMatch(mapId, selectedMapId, { loose: true }) &&
+                    !this.mapReferencesMatch(mapId, queuedState?.currentMapId, { loose: true })
+                ));
+
+                if (followUpMapId) {
+                    logger.warn(
+                        `[MapVoting S${this.serverNum}] Selected map ${selectedMapId} is already live; queueing ${followUpMapId} next to prevent stale sequence repeat`
+                    );
+                    await this.crcon.queueNextMapAtSequenceStart(followUpMapId);
+                    pendingQueuedMapId = followUpMapId;
+                } else {
+                    logger.warn(
+                        `[MapVoting S${this.serverNum}] Selected map ${selectedMapId} is already live and no follow-up map is available to queue`
+                    );
+                    pendingQueuedMapId = null;
+                }
+            }
         } else if (queueStrategy === 'direct-sequence-start') {
             throw new Error('Direct sequence-start queueing was requested but is not available');
         } else if (typeof this.crcon?.queueNextMap === 'function') {
@@ -1010,7 +1035,11 @@ class MapVotingService {
         }
 
         this.managedRotationPoolMapIds = rotationOrder;
-        this.setPendingQueuedMap(selectedMapId, source);
+        if (pendingQueuedMapId) {
+            this.setPendingQueuedMap(pendingQueuedMapId, source);
+        } else {
+            this.clearPendingQueuedMap();
+        }
         return rotationOrder;
     }
 
@@ -1623,8 +1652,23 @@ class MapVotingService {
             }
 
             const alternateMaps = currentMapId
-                ? configuredMaps.filter(map => map.id !== currentMapId)
+                ? configuredMaps.filter((map) => {
+                    const generalMapKey = this.getGeneralMapKey(map);
+                    if (map.id === currentMapId) {
+                        return false;
+                    }
+                    if (generalMapKey && currentGeneralMapKey && generalMapKey === currentGeneralMapKey) {
+                        return false;
+                    }
+                    return true;
+                })
                 : configuredMaps;
+            if (currentMapId && alternateMaps.length === 0) {
+                logger.warn(
+                    `[MapVoting S${this.serverNum}] Non-seeded rotation skipped because configured maps only contain the current map/base map (${currentMapId})`
+                );
+                return false;
+            }
             const cooldownEligibleMaps = alternateMaps.filter((map) => {
                 const generalMapKey = this.getGeneralMapKey(map);
                 if (recentMapIds.has(map.id)) {
@@ -1639,7 +1683,7 @@ class MapVotingService {
                 ? cooldownEligibleMaps
                 : alternateMaps.length > 0
                     ? alternateMaps
-                    : configuredMaps;
+                    : [];
             const selectedMap = selectionPool[Math.floor(Math.random() * selectionPool.length)];
 
             if (!selectedMap) {

@@ -1463,6 +1463,52 @@ test('non-seeded rotation avoids re-selecting the current map when alternatives 
     }
 });
 
+test('non-seeded rotation refuses same-base current map when no alternative exists', async () => {
+    const originalConfig = JSON.parse(JSON.stringify(configManager.config));
+    const service = new MapVotingService(1);
+    let queueCalls = 0;
+
+    configManager.config.servers = {
+        ...configManager.config.servers,
+        1: {
+            ...(configManager.config.servers?.[1] || {}),
+            nonSeededMapList: ['omahabeach_warfare', 'omahabeach_offensive_us']
+        }
+    };
+
+    service.blacklist = [];
+    service.getAllMaps = async () => ([
+        { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day', map: { name: 'Omaha Beach' } },
+        { id: 'omahabeach_offensive_us', pretty_name: 'Omaha Beach Offensive', game_mode: 'offensive', environment: 'day', map: { name: 'Omaha Beach' } }
+    ]);
+    service.getRecentExclusionContext = async () => ({
+        recentMapIds: new Set(['omahabeach_warfare']),
+        recentGeneralMapKeys: new Set(['omaha beach']),
+        currentMapId: 'omahabeach_warfare',
+        currentGeneralMapKey: 'omaha beach',
+        historyAvailable: true,
+        hasExactRepeatProtection: true,
+        reliable: true
+    });
+    service.crcon = {
+        queueNextMapAtSequenceStart: async () => {
+            queueCalls += 1;
+        },
+        replaceMapRotation: async () => {
+            queueCalls += 1;
+        }
+    };
+
+    try {
+        const applied = await service.applyNonSeededRotation();
+
+        assert.equal(applied, false);
+        assert.equal(queueCalls, 0);
+    } finally {
+        configManager.config = originalConfig;
+    }
+});
+
 test('non-seeded rotation uses direct sequence queueing when direct RCON is available', async () => {
     const originalConfig = JSON.parse(JSON.stringify(configManager.config));
     const service = new MapVotingService(1);
@@ -1510,6 +1556,58 @@ test('non-seeded rotation uses direct sequence queueing when direct RCON is avai
     } finally {
         configManager.config = originalConfig;
     }
+});
+
+test('direct managed rotation queues a follow-up map when selected winner is already current', async () => {
+    const service = new MapVotingService(1);
+    const queueCalls = [];
+
+    service.crcon = {
+        queueNextMapAtSequenceStart: async (mapId) => {
+            queueCalls.push(mapId);
+
+            if (mapId === 'stmariedumont_warfare') {
+                return {
+                    queuedState: {
+                        currentMapId: 'stmariedumont_warfare',
+                        nextMapId: 'omahabeach_warfare',
+                        source: 'direct-sequence'
+                    }
+                };
+            }
+
+            return {
+                queuedState: {
+                    currentMapId: 'stmariedumont_warfare',
+                    nextMapId: mapId,
+                    source: 'direct-sequence'
+                }
+            };
+        },
+        hasDirectRconConfigured: () => true
+    };
+
+    const rotationOrder = await service.applyManagedRotationSelection(
+        'stmariedumont_warfare',
+        'test-selected-already-current',
+        {
+            whitelist: [
+                'stmariedumont_warfare',
+                'foy_warfare',
+                'omahabeach_warfare'
+            ]
+        },
+        [
+            { id: 'stmariedumont_warfare', pretty_name: 'St. Marie Du Mont Warfare', game_mode: 'warfare', environment: 'day' },
+            { id: 'foy_warfare', pretty_name: 'Foy Warfare', game_mode: 'warfare', environment: 'day' },
+            { id: 'omahabeach_warfare', pretty_name: 'Omaha Beach Warfare', game_mode: 'warfare', environment: 'day' }
+        ],
+        { queueStrategy: 'direct-sequence-start' }
+    );
+
+    assert.deepEqual(queueCalls, ['stmariedumont_warfare', 'foy_warfare']);
+    assert.deepEqual(rotationOrder, ['stmariedumont_warfare', 'foy_warfare', 'omahabeach_warfare']);
+    assert.equal(service.getPendingQueuedMap().mapId, 'foy_warfare');
 });
 
 test('non-seeded rotation returns false when verified queueing rejects the selected map', async () => {
