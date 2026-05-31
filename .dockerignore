@@ -1,0 +1,21 @@
+.env
+.git
+.claude
+.continue
+node_modules
+logs
+*.log
+npm-debug.log*
+
+# Runtime state lives on the Railway /data volume and should not be baked into images.
+data/config.json
+data/schedules.json
+data/votes.json
+data/test
+
+# Local/test-only files are not needed by the production image.
+test
+docs
+README.md
+AGENTS.md
+LICENSE
