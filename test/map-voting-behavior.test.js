@@ -798,6 +798,58 @@ test('getMapsToVote includes Juno Beach in every generated vote unless it is cur
     assert.equal(voteMaps.length, 2);
 });
 
+test('checkActiveVote replaces an existing live poll when it is missing Juno Beach', async () => {
+    const serverNum = 1;
+    const gameStart = 1780642000000;
+    const messageId = `vote-${gameStart}`;
+    let deletedMessage = false;
+
+    voteStore.deleteVote(gameStart, serverNum);
+    voteStore.setVote(messageId, gameStart, serverNum, [
+        {
+            pollKey: '[1] Carentan | Warfare | Day',
+            map: {
+                id: 'carentan_warfare',
+                pretty_name: 'Carentan Warfare',
+                vote_label: 'Carentan | Warfare | Day'
+            }
+        }
+    ]);
+
+    const service = new MapVotingService(serverNum);
+    service.getGameStartTime = async () => gameStart;
+    service.channel = {
+        messages: {
+            fetch: async (requestedMessageId) => {
+                assert.equal(requestedMessageId, messageId);
+                return {
+                    id: messageId,
+                    poll: {
+                        resultsFinalized: false,
+                        answers: new Map([
+                            ['1', { text: '[1] Carentan | Warfare | Day' }]
+                        ])
+                    },
+                    delete: async () => {
+                        deletedMessage = true;
+                    }
+                };
+            }
+        }
+    };
+
+    try {
+        const resumed = await service.checkActiveVote();
+
+        assert.equal(resumed, false);
+        assert.equal(deletedMessage, true);
+        assert.equal(voteStore.getVote(gameStart, serverNum), null);
+        assert.equal(service.voteMessageId, null);
+    } finally {
+        voteStore.deleteVote(gameStart, serverNum);
+    }
+});
+
 test('get_status failures enter backoff and skip repeated polling attempts', async () => {
     const service = new MapVotingService(1);
     let statusCalls = 0;

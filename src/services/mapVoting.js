@@ -506,6 +506,23 @@ class MapVotingService {
                     const isFinalized = this.voteMessage.poll.resultsFinalized === true;
 
                     if (!isFinalized) {
+                        if (!this.pollHasForcedVoteMaps(this.voteMessage.poll)) {
+                            logger.warn(
+                                `[MapVoting S${this.serverNum}] Existing vote is missing forced vote map(s); replacing poll for gameStart ${this.gameStart}`
+                            );
+                            voteStore.deleteVote(this.gameStart, this.serverNum);
+                            try {
+                                await this.voteMessage.delete();
+                            } catch (deleteError) {
+                                logger.warn(
+                                    `[MapVoting S${this.serverNum}] Could not delete stale vote poll missing forced map(s): ${deleteError.message}`
+                                );
+                            }
+                            this.voteMessageId = null;
+                            this.voteMessage = null;
+                            return false;
+                        }
+
                         // Resume the existing vote
                         const livePollMaps = await this.getMapsFromPoll(this.voteMessage.poll);
                         this.maps = livePollMaps.length > 0 ? livePollMaps : (existingVote.maps || []);
@@ -1230,6 +1247,13 @@ class MapVotingService {
         return String(value).trim().toLowerCase();
     }
 
+    normalizePollAnswerText(value) {
+        return this.normalizeMapKey(
+            String(value || '')
+                .replace(/^\[\d+\]\s*/, '')
+        );
+    }
+
     getMapAliases(map) {
         return [
             map?.id,
@@ -1330,6 +1354,34 @@ class MapVotingService {
                 usedGeneralMapKeys.add(generalMapKey);
             }
         }
+    }
+
+    pollHasForcedVoteMaps(poll) {
+        if (!poll?.answers) {
+            return false;
+        }
+
+        const bundledMapsById = this.buildMapLookupById(hllMapCatalog.getMaps());
+        const answerLabels = [...poll.answers.values()]
+            .map((answer) => this.normalizePollAnswerText(answer?.text))
+            .filter(Boolean);
+
+        for (const forcedMapId of FORCED_VOTE_MAP_IDS) {
+            const forcedMap = bundledMapsById.get(forcedMapId);
+            const acceptedLabels = [
+                forcedMapId,
+                forcedMap?.pretty_name,
+                forcedMap ? this.getVoteLabel(forcedMap) : null
+            ]
+                .map((label) => this.normalizePollAnswerText(label))
+                .filter(Boolean);
+
+            if (!acceptedLabels.some((label) => answerLabels.includes(label))) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     buildCanonicalMapLookup(allMaps) {
