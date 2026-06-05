@@ -176,6 +176,13 @@
         "mode": "warfare",
         "time": "day",
         "pretty_name": "Carentan Warfare"
+      },
+      {
+        "id": "junobeach_warfare_morning",
+        "name": "JUNO BEACH",
+        "mode": "warfare",
+        "time": "day",
+        "pretty_name": "Juno Beach Warfare"
       }
     ],
     "createdAt": 1772402702610
