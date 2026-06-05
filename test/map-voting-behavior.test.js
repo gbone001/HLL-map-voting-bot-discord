@@ -731,6 +731,73 @@ test('getMapsToVote includes skirmish options when skirmish weight is enabled', 
     assert.ok(voteMapIds.includes('mortain_skirmish_overcast'));
 });
 
+test('forced vote catalog maps are merged into live map lists when CRCON has not returned them', () => {
+    const service = new MapVotingService(1);
+
+    const maps = service.withForcedVoteCatalogMaps([
+        {
+            id: 'carentan_warfare',
+            pretty_name: 'Carentan Warfare',
+            game_mode: 'warfare',
+            environment: 'day',
+            map: { name: 'Carentan' }
+        }
+    ]);
+
+    assert.ok(maps.some((map) => map.id === 'junobeach_warfare_morning'));
+});
+
+test('getMapsToVote includes Juno Beach in every generated vote unless it is current', async () => {
+    const service = new MapVotingService(1);
+    service.mapsPerVote = 2;
+    service.nightMapCount = 0;
+    service.modeWeights = {
+        warfare: 1,
+        offensive: 0,
+        skirmish: 0
+    };
+    service.blacklist = [];
+    service.getAllMaps = async () => ([
+        {
+            id: 'junobeach_warfare_morning',
+            pretty_name: 'Juno Beach Warfare (Dawn)',
+            game_mode: 'warfare',
+            environment: 'dawn',
+            map: { name: 'Juno Beach' }
+        },
+        {
+            id: 'carentan_warfare',
+            pretty_name: 'Carentan Warfare',
+            game_mode: 'warfare',
+            environment: 'day',
+            map: { name: 'Carentan' }
+        },
+        {
+            id: 'foy_warfare',
+            pretty_name: 'Foy Warfare',
+            game_mode: 'warfare',
+            environment: 'day',
+            map: { name: 'Foy' }
+        }
+    ]);
+    service.getRecentExclusionContext = async () => ({
+        recentMapIds: new Set(['junobeach_warfare_morning']),
+        recentGeneralMapKeys: new Set(['juno beach']),
+        currentMapId: 'foy_warfare',
+        currentGeneralMapKey: 'foy',
+        historyAvailable: true,
+        hasExactRepeatProtection: true,
+        reliable: true
+    });
+    service.getEffectiveWhitelist = async () => new Set(['carentan_warfare']);
+
+    const voteMaps = await service.getMapsToVote();
+    const voteMapIds = voteMaps.map((map) => map.id);
+
+    assert.ok(voteMapIds.includes('junobeach_warfare_morning'));
+    assert.equal(voteMaps.length, 2);
+});
+
 test('get_status failures enter backoff and skip repeated polling attempts', async () => {
     const service = new MapVotingService(1);
     let statusCalls = 0;

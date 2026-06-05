@@ -675,6 +675,21 @@
     "stress": true
   },
   {
+    "id": "junobeach_warfare_morning",
+    "type": "warfare",
+    "environment": "dawn",
+    "name": "JUNO BEACH",
+    "friendly_name": "JUNO BEACH",
+    "pretty_name": "Juno Beach Warfare (Dawn)",
+    "map": "Juno Beach",
+    "mode": "warfare",
+    "variant": "Dawn",
+    "vote_label": "Juno Beach | Warfare | Dawn",
+    "weight": null,
+    "seeding": true,
+    "stress": null
+  },
+  {
     "id": "kharkov_offensive_ger",
     "type": "offensive",
     "environment": "day",

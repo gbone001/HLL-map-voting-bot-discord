@@ -12,6 +12,8 @@ const voteStore = require('./voteStore');
 const configManager = require('./configManager');
 const { hllMapCatalog } = require('./hllMapCatalog');
 
+const FORCED_VOTE_MAP_IDS = ['junobeach_warfare_morning'];
+
 class MapVotingService {
     constructor(serverNum = 1) {
         MapVotingService.instanceCounter = (MapVotingService.instanceCounter || 0) + 1;
@@ -164,7 +166,7 @@ class MapVotingService {
         try {
             const response = await this.crcon.getMaps();
             if (response && response.result) {
-                this.cachedMaps = response.result;
+                this.cachedMaps = this.withForcedVoteCatalogMaps(response.result);
                 this.cacheTime = now;
                 return this.cachedMaps;
             }
@@ -1276,6 +1278,60 @@ class MapVotingService {
         );
     }
 
+    withForcedVoteCatalogMaps(allMaps) {
+        const maps = Array.isArray(allMaps) ? [...allMaps] : [];
+        const mapIds = new Set(maps.map((map) => map?.id).filter(Boolean));
+        const bundledMapsById = this.buildMapLookupById(hllMapCatalog.getMaps());
+
+        for (const forcedMapId of FORCED_VOTE_MAP_IDS) {
+            if (mapIds.has(forcedMapId)) {
+                continue;
+            }
+
+            const bundledMap = bundledMapsById.get(forcedMapId);
+            if (bundledMap) {
+                maps.push(bundledMap);
+                mapIds.add(forcedMapId);
+            }
+        }
+
+        return maps;
+    }
+
+    addForcedVoteMaps(result, allMaps, usedMapIds, usedGeneralMapKeys, exclusionContext) {
+        const allMapsById = this.buildMapLookupById(allMaps);
+        const {
+            currentMapId,
+            currentGeneralMapKey
+        } = exclusionContext;
+
+        for (const forcedMapId of FORCED_VOTE_MAP_IDS) {
+            if (result.length >= this.mapsPerVote || usedMapIds.has(forcedMapId)) {
+                continue;
+            }
+
+            const map = allMapsById.get(forcedMapId);
+            if (!map) {
+                logger.warn(`[MapVoting S${this.serverNum}] Forced vote map is not available in catalog: ${forcedMapId}`);
+                continue;
+            }
+
+            const generalMapKey = this.getGeneralMapKey(map);
+            const isCurrentMap = currentMapId === map.id;
+            const isCurrentBaseMap = generalMapKey && currentGeneralMapKey === generalMapKey;
+            if (isCurrentMap || isCurrentBaseMap) {
+                logger.warn(`[MapVoting S${this.serverNum}] Forced vote map ${map.id} matches the live current map; skipping`);
+                continue;
+            }
+
+            result.push(this.formatMapForVote(map));
+            usedMapIds.add(map.id);
+            if (generalMapKey) {
+                usedGeneralMapKeys.add(generalMapKey);
+            }
+        }
+    }
+
     buildCanonicalMapLookup(allMaps) {
         const lookup = new Map();
 
@@ -1524,6 +1580,7 @@ class MapVotingService {
             const result = [];
             const usedMapIds = new Set();
             const usedGeneralMapKeys = new Set(currentGeneralMapKey ? [currentGeneralMapKey] : []);
+            this.addForcedVoteMaps(result, allMaps, usedMapIds, usedGeneralMapKeys, exclusionContext);
             const dayMapsNeeded = this.mapsPerVote - this.nightMapCount;
 
             const shuffledDayMapsByMode = {
