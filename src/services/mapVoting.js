@@ -158,7 +158,7 @@ class MapVotingService {
 
         const catalogStatus = hllMapCatalog.getCatalogStatus();
         if (catalogStatus.hasRuntimeCatalog) {
-            this.cachedMaps = hllMapCatalog.getMaps();
+            this.cachedMaps = this.withForcedVoteCatalogMaps(hllMapCatalog.getMaps());
             this.cacheTime = now;
             return this.cachedMaps;
         }
@@ -1305,7 +1305,7 @@ class MapVotingService {
     withForcedVoteCatalogMaps(allMaps) {
         const maps = Array.isArray(allMaps) ? [...allMaps] : [];
         const mapIds = new Set(maps.map((map) => map?.id).filter(Boolean));
-        const bundledMapsById = this.buildMapLookupById(hllMapCatalog.getMaps());
+        const bundledMapsById = this.buildMapLookupById(hllMapCatalog.getBundledMaps());
 
         for (const forcedMapId of FORCED_VOTE_MAP_IDS) {
             if (mapIds.has(forcedMapId)) {

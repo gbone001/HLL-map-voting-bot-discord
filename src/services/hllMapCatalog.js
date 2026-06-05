@@ -305,6 +305,10 @@ class HllMapCatalogService {
         return this.getEntries().map(toLegacyMapShape);
     }
 
+    getBundledMaps() {
+        return this.bundledEntries.map(toLegacyMapShape);
+    }
+
     getCatalogStatus() {
         const runtimeEntries = this.readRuntimeEntries();
         const hasRuntimeCatalog = Array.isArray(runtimeEntries) && runtimeEntries.length > 0;
